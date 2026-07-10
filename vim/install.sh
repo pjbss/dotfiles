@@ -1,12 +1,8 @@
 #!/bin/sh
-rm ~/.vim
-rm ~/.vimrc
-ln -s $DOTFILES_HOME/vim ~/.vim
-ln -s ~/.vim/vimrc ~/.vimrc
+install_link "$DOTFILES_HOME/vim" ~/.vim
+install_link ~/.vim/vimrc ~/.vimrc
 
-mkdir ~/tmp
-mkdir ~/tmp/vim
-mkdir ~/tmp/vim/backup
-mkdir ~/tmp/vim/swap
+mkdir -p ~/tmp/vim/backup
+mkdir -p ~/tmp/vim/swap
 
 git submodule update --init

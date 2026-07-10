@@ -1,3 +1,2 @@
 #!/bin/sh
-rm ~/.zshrc
-ln -s $DOTFILES_HOME/zsh/zshrc ~/.zshrc
+install_link "$DOTFILES_HOME/zsh/zshrc" ~/.zshrc

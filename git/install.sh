@@ -1,12 +1,17 @@
 #!/bin/sh
-if [ -e ~/.gitconfig.dotfiles.backup ]
-then
-	echo "git backup exists"
-else
-	cp ~/.gitconfig ~/.gitconfig.dotfiles.backup
+GITCONFIG_MARKER="# dotfiles: managed block from $DOTFILES_HOME/git/gitconfig.partial"
+
+if [ -e ~/.gitconfig ] && grep -qF "$GITCONFIG_MARKER" ~/.gitconfig 2>/dev/null; then
+	exit 0
 fi
 
-rm ~/.gitconfig
-cp ~/.gitconfig.dotfiles.backup ~/.gitconfig
+if [ -e ~/.gitconfig ]; then
+	backup=~/.gitconfig.dotfiles-backup.$(date +%Y%m%d%H%M%S)
+	cp ~/.gitconfig "$backup"
+	echo "git/install.sh: backed up ~/.gitconfig -> $backup"
+fi
 
-cat $DOTFILES_HOME/git/gitconfig.partial >> ~/.gitconfig
+{
+	echo "$GITCONFIG_MARKER"
+	cat "$DOTFILES_HOME/git/gitconfig.partial"
+} >> ~/.gitconfig
