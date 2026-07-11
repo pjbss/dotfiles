@@ -30,7 +30,17 @@ rendering into GitHub Copilot's format are not yet supported by this
 script -- see `issues/020-local-skills-sync.md` and
 `issues/019-copilot-skill-sync.md`.
 
+## Claude-only extension layer
+
+`agents/claude-only/` holds content with no Copilot equivalent (subagents,
+Workflow scripts). It's rendered into Claude's output only -- see
+`agents/claude-only/README.md` for its layout. The neutral `agents/skills/`
+core above is unaffected by its presence, and any future Copilot adapter
+must skip it entirely rather than attempt a lossy translation.
+
 ## Example
 
 `agents/skills/dotfiles-help/` is a minimal skill that proves the
 render pipeline end-to-end and explains this repo's structure.
+`agents/claude-only/subagents/dotfiles-example.md` does the same for the
+Claude-only layer.
