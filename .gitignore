@@ -2,3 +2,6 @@
 .idea/.name
 
 *.iml
+
+# machine-local, company-specific config (see zsh/zshrc, git/install.sh)
+/local/
