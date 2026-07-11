@@ -1,25 +1,35 @@
-#!/bin/sh
+#!/bin/zsh
 export LANG=en_US.UTF-8
 
 PATH=$PATH:/usr/local/sbin
 PATH=$PATH:$HOME/.rvm/bin # Add RVM to PATH for scripting
 PATH=/usr/local/share/python:/usr/local/bin:$PATH # modify path to make homebrew python happy
 
-# find where the .zshrc file is linked to
-SOURCE="$HOME/.zshrc"
+# find this file's real location, whether it's sourced directly (e.g. for
+# testing) or indirectly via a ~/.zshrc symlink into this repo
+SOURCE="${(%):-%x}"
 while [ -h "$SOURCE" ] ;
-do 
-	SOURCE="$(readlink "$SOURCE")"; 
+do
+	SOURCE="$(readlink "$SOURCE")";
 done
-ZSH_DOTFILES="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+ZSH_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
+DOTFILES_HOME="$( cd -P "$ZSH_DIR/.." && pwd )"
 
-# add all .fn files to fpath
-for fn_dir ($ZSH_DOTFILES/*/) do 
-	fpath=($fn_dir $fpath)
+# make functions in zsh/modules and zsh/prompt available for autoloading
+fpath=($ZSH_DIR/modules $ZSH_DIR/prompt $fpath)
+
+# source public modules
+for config_file ($ZSH_DIR/modules/*.zsh(N)) do
+	source $config_file
 done
 
-# source every .zsh file in this repo
-for config_file ($ZSH_DOTFILES/**/*.zsh) do 
+# source the prompt (segments + PROMPT/RPROMPT assembly)
+for config_file ($ZSH_DIR/prompt/*.zsh(N)) do
+	source $config_file
+done
+
+# source private/company-specific modules, if present (see local/ convention)
+for config_file ($DOTFILES_HOME/local/zsh/*.zsh(N)) do
 	source $config_file
 done
 
