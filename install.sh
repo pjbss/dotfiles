@@ -28,6 +28,58 @@ install_link() {
 	echo "install_link: linked $dst -> $src"
 }
 
+# detect_package_manager
+#
+# Echoes the first available package manager, checked in priority order
+# (Homebrew, then apt, then dnf). Echoes nothing if none are found.
+detect_package_manager() {
+	if command -v brew >/dev/null 2>&1; then
+		echo brew
+	elif command -v apt-get >/dev/null 2>&1; then
+		echo apt
+	elif command -v dnf >/dev/null 2>&1; then
+		echo dnf
+	fi
+}
+
+# ensure_installed cmd pkg
+#
+# No-ops if `cmd` is already on PATH. Otherwise installs `pkg` using the
+# package manager detect_package_manager finds, or fails with a clear
+# message (rather than an obscure error or a silent skip) if none is
+# available.
+ensure_installed() {
+	cmd="$1"
+	pkg="$2"
+
+	if command -v "$cmd" >/dev/null 2>&1; then
+		return 0
+	fi
+
+	pm="$(detect_package_manager)"
+	case "$pm" in
+		brew)
+			echo "ensure_installed: installing $pkg via Homebrew"
+			brew install "$pkg"
+			;;
+		apt)
+			echo "ensure_installed: installing $pkg via apt"
+			sudo apt-get update && sudo apt-get install -y "$pkg"
+			;;
+		dnf)
+			echo "ensure_installed: installing $pkg via dnf"
+			sudo dnf install -y "$pkg"
+			;;
+		*)
+			echo "ensure_installed: no supported package manager found (checked: brew, apt, dnf) -- please install '$pkg' manually" >&2
+			return 1
+			;;
+	esac
+}
+
+# external tools required by dotfiles modules
+ensure_installed fzf fzf
+
 for sub_dir in $DOTFILES_HOME/*/; do
 	if [ -f $sub_dir/install.sh ]; then
 		source $sub_dir/install.sh
