@@ -25,10 +25,15 @@ skill under `agents/skills/*/SKILL.md` into `~/.claude/skills/`. This is
 always a manual, explicit step -- nothing in this repo triggers it
 automatically. Re-run it any time a skill is added or changed.
 
-Skills under a gitignored `local/skills/` (private/company skills) and
-rendering into GitHub Copilot's format are not yet supported by this
-script -- see `issues/020-local-skills-sync.md` and
-`issues/019-copilot-skill-sync.md`.
+Skills under a gitignored `local/skills/<skill-name>/SKILL.md` (private/
+company skills, same format as above, per the repo-root `local/`
+convention -- see `.gitignore`) are scanned and rendered the same way,
+into the same `~/.claude/skills/` destination. A `local/skills/` skill
+with the same name as an `agents/skills/` one wins, since it's scanned
+second.
+
+Rendering into GitHub Copilot's format is not yet supported by this
+script -- see `issues/019-copilot-skill-sync.md`.
 
 ## Claude-only extension layer
 

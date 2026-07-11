@@ -9,6 +9,10 @@
 # Currently supported targets:
 #   - Claude Code: agents/skills/*/SKILL.md -> ~/.claude/skills/<skill-name>/,
 #     copied at full fidelity (frontmatter, body, and any supporting files).
+#   - Claude Code: local/skills/*/SKILL.md (gitignored, private/company
+#     skills -- see local/README.md) -> ~/.claude/skills/<skill-name>/, same
+#     full-fidelity treatment as agents/skills/. Scanned after agents/skills/,
+#     so a local skill with the same name wins.
 #   - Claude Code: agents/claude-only/subagents/*.md ->
 #     ~/.claude/agents/<name>.md, copied at full fidelity.
 #   - Claude Code: agents/claude-only/workflows/*.js ->
@@ -23,6 +27,7 @@ BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 SKILLS_SRC_DIR="$DOTFILES_HOME/agents/skills"
+LOCAL_SKILLS_SRC_DIR="$DOTFILES_HOME/local/skills"
 CLAUDE_SKILLS_DST_DIR="$HOME/.claude/skills"
 
 SUBAGENTS_SRC_DIR="$DOTFILES_HOME/agents/claude-only/subagents"
@@ -54,14 +59,26 @@ sync_claude_only_file() {
 	echo "dotfiles-sync-agents: rendered $file_name -> $dst"
 }
 
-if [ ! -d "$SKILLS_SRC_DIR" ]; then
-	echo "dotfiles-sync-agents: no skills found at $SKILLS_SRC_DIR" >&2
-else
-	for skill_dir in "$SKILLS_SRC_DIR"/*/; do
+sync_claude_skills_dir() {
+	skills_src_dir="$1"
+
+	if [ ! -d "$skills_src_dir" ]; then
+		return
+	fi
+
+	for skill_dir in "$skills_src_dir"/*/; do
 		[ -f "$skill_dir/SKILL.md" ] || continue
 		sync_claude_skill "$skill_dir"
 	done
+}
+
+if [ ! -d "$SKILLS_SRC_DIR" ]; then
+	echo "dotfiles-sync-agents: no skills found at $SKILLS_SRC_DIR" >&2
+else
+	sync_claude_skills_dir "$SKILLS_SRC_DIR"
 fi
+
+sync_claude_skills_dir "$LOCAL_SKILLS_SRC_DIR"
 
 if [ -d "$SUBAGENTS_SRC_DIR" ]; then
 	for subagent_file in "$SUBAGENTS_SRC_DIR"/*.md(N); do
