@@ -21,6 +21,12 @@ PATH=$DOTFILES_HOME/bin:$PATH
 # make functions in zsh/modules and zsh/prompt available for autoloading
 fpath=($ZSH_DIR/modules $ZSH_DIR/prompt $fpath)
 
+# initialize autocomplete before sourcing modules, so a module that registers
+# its own completions at source time (e.g. aws.zsh's `complete -C aws_completer
+# aws`, via bashcompinit) has `compdef` available rather than erroring
+autoload -U compinit
+compinit -i
+
 # source public modules
 for config_file ($ZSH_DIR/modules/*.zsh(N)) do
 	source $config_file
@@ -35,7 +41,3 @@ done
 for config_file ($DOTFILES_HOME/local/zsh/*.zsh(N)) do
 	source $config_file
 done
-
-# initialize autocomplete
-autoload -U compinit
-compinit -i
