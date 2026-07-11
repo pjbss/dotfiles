@@ -14,4 +14,6 @@ fi
 {
 	echo "$GITCONFIG_MARKER"
 	cat "$DOTFILES_HOME/git/gitconfig.partial"
+	echo "[include]"
+	echo "	path = $DOTFILES_HOME/local/gitconfig.local"
 } >> ~/.gitconfig
