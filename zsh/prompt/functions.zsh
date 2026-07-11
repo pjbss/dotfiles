@@ -104,6 +104,12 @@ function python_prompt_info() {
   echo "$ZSH_THEME_PYTHON_PROMPT_PREFIX$name$ZSH_THEME_PYTHON_PROMPT_SUFFIX"
 }
 
+# Shows the active $AWS_PROFILE. No-op when unset.
+function aws_prompt_info() {
+  [[ -z "$AWS_PROFILE" ]] && return
+  echo "$ZSH_THEME_AWS_PROMPT_PREFIX$AWS_PROFILE$ZSH_THEME_AWS_PROMPT_SUFFIX"
+}
+
 #compare the provided version of git to the version installed and on path
 #prints 1 if input version <= installed version
 #prints -1 otherwise 
