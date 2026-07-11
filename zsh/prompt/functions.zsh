@@ -22,6 +22,15 @@ parse_git_dirty() {
 }
 
 
+# Shows the number of worktrees for the current repo. No-op outside a git
+# repo, and when there's only the one (primary) worktree.
+function git_prompt_worktree_count() {
+  local count
+  count=$(git worktree list 2> /dev/null | wc -l | tr -d ' ')
+  [[ -z "$count" || "$count" -le 1 ]] && return
+  echo "$ZSH_THEME_GIT_PROMPT_WORKTREE_PREFIX$count$ZSH_THEME_GIT_PROMPT_WORKTREE_SUFFIX"
+}
+
 # Checks if there are commits ahead from remote
 function git_prompt_ahead() {
   if $(echo "$(git log origin/$(current_branch)..HEAD 2> /dev/null)" | grep '^commit' &> /dev/null); then
