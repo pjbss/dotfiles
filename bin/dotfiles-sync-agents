@@ -1,0 +1,40 @@
+#!/bin/zsh
+# dotfiles-sync-agents
+#
+# Renders tool-neutral skills under agents/skills/<skill-name>/SKILL.md into
+# each supported tool's native format. Manual/explicit only -- nothing in
+# this repo runs this automatically.
+#
+# Currently supported targets:
+#   - Claude Code: agents/skills/*/SKILL.md -> ~/.claude/skills/<skill-name>/,
+#     copied at full fidelity (frontmatter, body, and any supporting files).
+
+SOURCE="${(%):-%x}"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+SKILLS_SRC_DIR="$DOTFILES_HOME/agents/skills"
+CLAUDE_SKILLS_DST_DIR="$HOME/.claude/skills"
+
+sync_claude_skill() {
+	skill_dir="$1"
+	skill_name="$(basename "$skill_dir")"
+	dst="$CLAUDE_SKILLS_DST_DIR/$skill_name"
+
+	mkdir -p "$CLAUDE_SKILLS_DST_DIR"
+	rm -rf "$dst"
+	mkdir -p "$dst"
+	cp -R "$skill_dir/." "$dst/"
+	echo "dotfiles-sync-agents: rendered $skill_name -> $dst"
+}
+
+if [ ! -d "$SKILLS_SRC_DIR" ]; then
+	echo "dotfiles-sync-agents: no skills found at $SKILLS_SRC_DIR" >&2
+	exit 0
+fi
+
+for skill_dir in "$SKILLS_SRC_DIR"/*/; do
+	[ -f "$skill_dir/SKILL.md" ] || continue
+	sync_claude_skill "$skill_dir"
+done

@@ -15,6 +15,9 @@ done
 ZSH_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 DOTFILES_HOME="$( cd -P "$ZSH_DIR/.." && pwd )"
 
+# make repo-provided commands (e.g. dotfiles-sync-agents) available on PATH
+PATH=$DOTFILES_HOME/bin:$PATH
+
 # make functions in zsh/modules and zsh/prompt available for autoloading
 fpath=($ZSH_DIR/modules $ZSH_DIR/prompt $fpath)
 
