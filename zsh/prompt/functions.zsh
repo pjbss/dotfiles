@@ -89,6 +89,21 @@ git_prompt_status() {
   echo $STATUS
 }
 
+# Shows the active Python virtualenv (basename of $VIRTUAL_ENV), or, if no
+# virtualenv is active, the active pyenv version. No-op when neither is
+# active, when pyenv isn't installed, or when pyenv reports "system".
+function python_prompt_info() {
+  local name
+  if [[ -n "$VIRTUAL_ENV" ]]; then
+    name=$(basename "$VIRTUAL_ENV")
+  elif command -v pyenv &> /dev/null; then
+    name=$(pyenv version-name 2> /dev/null)
+    [[ "$name" == "system" ]] && return
+  fi
+  [[ -z "$name" ]] && return
+  echo "$ZSH_THEME_PYTHON_PROMPT_PREFIX$name$ZSH_THEME_PYTHON_PROMPT_SUFFIX"
+}
+
 #compare the provided version of git to the version installed and on path
 #prints 1 if input version <= installed version
 #prints -1 otherwise 
