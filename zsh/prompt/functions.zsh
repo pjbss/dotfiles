@@ -31,11 +31,19 @@ function git_prompt_worktree_count() {
   echo "$ZSH_THEME_GIT_PROMPT_WORKTREE_PREFIX$count$ZSH_THEME_GIT_PROMPT_WORKTREE_SUFFIX"
 }
 
-# Checks if there are commits ahead from remote
-function git_prompt_ahead() {
-  if $(echo "$(git log origin/$(current_branch)..HEAD 2> /dev/null)" | grep '^commit' &> /dev/null); then
-    echo "$ZSH_THEME_GIT_PROMPT_AHEAD"
-  fi
+# Shows ahead/behind commit counts vs. the current branch's upstream. No-op
+# outside a git repo, when there's no upstream configured, and when the
+# branch is even with its upstream.
+function git_prompt_ahead_behind() {
+  git rev-parse --abbrev-ref '@{upstream}' &> /dev/null || return
+  local behind ahead
+  read -r behind ahead <<< "$(git rev-list --left-right --count '@{upstream}...HEAD' 2> /dev/null)"
+  [[ -z "$behind" || -z "$ahead" ]] && return
+  local out=""
+  [[ "$ahead" -gt 0 ]] && out="${out}$ZSH_THEME_GIT_PROMPT_AHEAD$ahead"
+  [[ "$behind" -gt 0 ]] && out="${out}$ZSH_THEME_GIT_PROMPT_BEHIND$behind"
+  [[ -z "$out" ]] && return
+  echo "$ZSH_THEME_GIT_PROMPT_AHEAD_BEHIND_PREFIX$out$ZSH_THEME_GIT_PROMPT_AHEAD_BEHIND_SUFFIX"
 }
 
 # Formats prompt string for current git commit short SHA
