@@ -1,0 +1,33 @@
+#!/bin/zsh
+# dotfiles-test-install
+#
+# Builds a throwaway Docker sandbox and runs this repo's install.sh inside
+# it, against a sandbox user's $HOME that lives only in the container --
+# never the real machine's home directory. install.sh is run twice (to
+# check idempotency), then the sandbox drops into an interactive zsh shell
+# so the result (symlinks, prompt segments, aliases, etc.) can be validated
+# by hand, safely.
+#
+# The repo is bind-mounted read-only into the container, so nothing this
+# script runs can modify the working tree on the host. Requires Docker
+# (Docker Desktop, Rancher Desktop, OrbStack, etc. all work).
+
+SOURCE="${(%):-%x}"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+IMAGE_NAME="dotfiles-test-install"
+
+if ! command -v docker >/dev/null 2>&1; then
+	echo "dotfiles-test-install: docker not found on PATH -- install Docker Desktop, Rancher Desktop, or OrbStack first" >&2
+	exit 1
+fi
+
+echo "dotfiles-test-install: building sandbox image..."
+docker build -t "$IMAGE_NAME" "$DOTFILES_HOME/docker/test-install"
+
+echo "dotfiles-test-install: starting sandbox (repo mounted read-only; \$HOME lives only inside the container)..."
+docker run --rm -it \
+	-v "$DOTFILES_HOME:/dotfiles-src:ro" \
+	"$IMAGE_NAME"
