@@ -90,7 +90,7 @@ sync_skills_dir() {
 		return
 	fi
 
-	for skill_dir in "$skills_src_dir"/*/; do
+	for skill_dir in "$skills_src_dir"/*/(N); do
 		[ -f "$skill_dir/SKILL.md" ] || continue
 		sync_claude_skill "$skill_dir"
 		sync_copilot_skill "$skill_dir"
