@@ -1,3 +1,111 @@
-Clone the repo, and in the repo directory download the submodules and install the dotfiles.
+Personal dotfiles: a hand-rolled zsh setup (no oh-my-zsh, no plugin manager),
+vim, git config, and an agent-agnostic system for syncing LLM skills to
+Claude Code and GitHub Copilot CLI.
 
-$ ./install.sh
+## Install
+
+Clone the repo, and in the repo directory download the submodules and
+install the dotfiles.
+
+    $ git submodule update --init --recursive
+    $ ./install.sh
+
+`install.sh` walks every top-level directory (`zsh/`, `git/`, `vim/`, ...)
+and runs its own `install.sh`, if present. Each of those symlinks its config
+into place using a shared `install_link` helper: idempotent (a second run is
+a clean no-op) and safe (an existing real file/dir at the destination is
+backed up with a timestamped suffix before the symlink is created, nothing
+is ever silently overwritten). It also detects your package manager (brew,
+apt, or dnf) to install missing external dependencies like `fzf`.
+
+`install.sh` is safe to re-run any time, e.g. after pulling changes.
+
+## zsh
+
+### Module loader
+
+`zsh/zshrc` is the only file symlinked to `~/.zshrc`. It doesn't contain
+config directly -- instead it sources, in order:
+
+1. `zsh/modules/*.zsh` -- public shell config (aliases, functions, settings).
+2. `zsh/prompt/*.zsh` -- prompt segment functions and the `PROMPT`/`RPROMPT`
+   assembly.
+3. `local/zsh/*.zsh` -- private/machine-specific config, if present (see
+   `local/` below).
+
+To add a new module, drop a `.zsh` file in `zsh/modules/`. It's picked up
+automatically on the next shell start (or `reload!`, aliased in
+`aliases.zsh`) -- no changes to `zsh/zshrc` needed.
+
+Current modules: `aliases.zsh`, `common-aliases.zsh`, `functions.zsh`,
+`settings.zsh` (general shell options), `git.zsh`, `python.zsh`, `aws.zsh`,
+`macos.zsh` (Darwin-only helpers), and `fzf.zsh` (key bindings/completion,
+via fzf's own `--zsh` integration, no-op if fzf isn't installed). Most of
+these were ported from oh-my-zsh plugins, keeping only what this user's
+shell history showed was actually used.
+
+### Prompt segments
+
+`zsh/prompt/functions.zsh` defines the segment functions;
+`zsh/prompt/settings.zsh` assembles `PROMPT`/`RPROMPT` and their colors.
+Segments, each a no-op when not applicable:
+
+- `git_prompt_info` -- current branch + dirty marker.
+- `git_prompt_worktree_count` -- worktree count, shown only when a repo has
+  more than one.
+- `git_prompt_ahead_behind` -- ahead/behind counts vs. the upstream branch.
+- `python_prompt_info` -- active virtualenv name, or pyenv version if no
+  virtualenv is active.
+- `aws_prompt_info` -- `$AWS_PROFILE`, if set.
+
+## local/ (private/machine-specific config)
+
+`local/` is a gitignored directory at the repo root for config that should
+never be committed -- company-specific or single-machine overrides. Nothing
+under it is synced anywhere by this repo; it's scoped to keep it out of the
+public repo, not to sync it to other machines.
+
+- `local/zsh/*.zsh` -- sourced automatically by `zsh/zshrc`, after the
+  public modules. Same drop-in-a-file convention as `zsh/modules/`.
+- `local/gitconfig.local` -- included by the installed `~/.gitconfig` (after
+  `git/gitconfig.partial`), for overrides like a company-specific
+  `user.email`. Included unconditionally -- git silently ignores an
+  `include.path` pointing at a nonexistent file, so this takes effect live
+  as soon as the file is created, no reinstall needed.
+- `local/skills/<skill-name>/SKILL.md` -- private agent skills, same shape
+  as `agents/skills/` below.
+
+## Agent skills (`agents/`)
+
+Tool-neutral LLM agent skills, authored once and rendered out to each
+supported tool by `bin/dotfiles-sync-agents`.
+
+Each skill is a directory under `agents/skills/<skill-name>/` containing a
+`SKILL.md` (YAML frontmatter: `name`, `description`, optional `tags`; a
+markdown body as the instruction content) plus any optional supporting
+files. `agents/skills/dotfiles-help/` is a minimal example.
+
+Run `dotfiles-sync-agents` (on `PATH` once `~/.zshrc` is linked to this
+repo) any time a skill is added or changed. It renders every skill under
+`agents/skills/*/SKILL.md` and `local/skills/*/SKILL.md` (private skills
+win on a name collision, since they're scanned second) into:
+
+- **Claude Code**: `~/.claude/skills/<skill-name>/`, full-fidelity copy.
+- **GitHub Copilot CLI**: `~/.copilot/skills/<skill-name>/` (or
+  `$COPILOT_HOME/skills` if set), per Copilot CLI's own documented
+  personal-skills format -- nearly identical to the neutral one, except
+  Copilot has no `tags` frontmatter field, so that line is dropped cleanly.
+  This targets the Copilot CLI specifically, not VS Code's Copilot Chat
+  extension, whose personal-instructions mechanism is currently
+  undocumented and inconsistent in practice.
+
+`dotfiles-sync-agents` is always a manual, explicit step -- nothing in this
+repo runs it automatically.
+
+### Claude-only extension layer
+
+`agents/claude-only/` holds content with no Copilot equivalent -- subagent
+definitions (`subagents/<name>.md` -> `~/.claude/agents/<name>.md`) and
+Workflow scripts (`workflows/<name>.js` -> `~/.claude/workflows/<name>.js`),
+both rendered at full fidelity into Claude's output only. The Copilot
+adapter never scans this directory, so it's skipped by construction.
