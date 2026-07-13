@@ -6,9 +6,9 @@ Claude-only extensions: content with no GitHub Copilot equivalent
 portable and what isn't.
 
 `dotfiles-sync-agents` renders this directory into the Claude adapter's
-output only. When the Copilot adapter (`issues/019-copilot-skill-sync.md`)
-lands, it must skip `agents/claude-only/` entirely rather than attempt a
-lossy translation.
+output only. The Copilot adapter (rendering into `~/.copilot/skills/`, see
+`issues/done/019-copilot-skill-sync.md`) never scans `agents/claude-only/`,
+so it skips this content entirely rather than attempt a lossy translation.
 
 ## Layout
 

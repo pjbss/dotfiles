@@ -37,3 +37,24 @@ This slice should only be started once the module loader and all plugin-parity/p
 
 - User story 1
 - User story 8
+
+## Notes (autonomous pass, 2026-07-12)
+
+All blocking issues (001-015) are done, so this is unblocked in dependency terms. However,
+this slice was not executed autonomously, because its core action and acceptance criteria
+are both inherently HITL, not AFK:
+
+- The whole point of this issue is to run `install.sh` against the maintainer's real,
+  live `$HOME` for the first time, backing up and replacing the actual daily-driver
+  `~/.zshrc` (currently a standalone oh-my-zsh file, not yet a symlink). That's a
+  hard-to-reverse, single-machine, real-environment change, not a repo-local edit.
+- The acceptance criteria explicitly require opening new real interactive terminal
+  sessions and manually driving them to confirm parity (git aliases, common aliases,
+  python helpers, aws completion/profile switching, macOS helpers, fzf key bindings, and
+  all four prompt segments) and logging/fixing any gaps found. That validation can't be
+  done by an agent without a human at the keyboard.
+
+Given the standing guidance to sandbox `$HOME` for install.sh testing and to check with
+the user before hard-to-reverse changes to real (non-repo) system state, this issue is
+left open for the maintainer to run by hand: `./install.sh`, then open fresh terminal
+sessions and walk the acceptance-criteria checklist above. No code changes were made.

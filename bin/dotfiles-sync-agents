@@ -17,9 +17,17 @@
 #     ~/.claude/agents/<name>.md, copied at full fidelity.
 #   - Claude Code: agents/claude-only/workflows/*.js ->
 #     ~/.claude/workflows/<name>.js, copied at full fidelity.
+#   - GitHub Copilot CLI: agents/skills/*/SKILL.md and local/skills/*/SKILL.md
+#     -> ~/.copilot/skills/<skill-name>/ (or $COPILOT_HOME/skills if
+#     COPILOT_HOME is set), per Copilot CLI's documented personal-skills
+#     format (github.com/en/copilot/how-tos/copilot-cli/customize-copilot/
+#     add-skills). This format is nearly identical to the neutral one --
+#     `name`/`description` map directly and supporting files are copied
+#     as-is -- except Copilot has no `tags` frontmatter field, so that line
+#     is dropped cleanly from the rendered copy.
 #
-# agents/claude-only/ has no Copilot equivalent -- the Copilot adapter must
-# skip it entirely rather than attempt a lossy translation.
+# agents/claude-only/ has no Copilot equivalent -- the Copilot adapter skips
+# it entirely rather than attempt a lossy translation.
 
 SOURCE="${(%):-%x}"
 while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
@@ -29,6 +37,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 SKILLS_SRC_DIR="$DOTFILES_HOME/agents/skills"
 LOCAL_SKILLS_SRC_DIR="$DOTFILES_HOME/local/skills"
 CLAUDE_SKILLS_DST_DIR="$HOME/.claude/skills"
+COPILOT_SKILLS_DST_DIR="${COPILOT_HOME:-$HOME/.copilot}/skills"
 
 SUBAGENTS_SRC_DIR="$DOTFILES_HOME/agents/claude-only/subagents"
 CLAUDE_AGENTS_DST_DIR="$HOME/.claude/agents"
@@ -48,6 +57,21 @@ sync_claude_skill() {
 	echo "dotfiles-sync-agents: rendered $skill_name -> $dst"
 }
 
+sync_copilot_skill() {
+	skill_dir="$1"
+	skill_name="$(basename "$skill_dir")"
+	dst="$COPILOT_SKILLS_DST_DIR/$skill_name"
+
+	mkdir -p "$COPILOT_SKILLS_DST_DIR"
+	rm -rf "$dst"
+	mkdir -p "$dst"
+	cp -R "$skill_dir/." "$dst/"
+	# Copilot's SKILL.md frontmatter has no `tags` equivalent -- drop it
+	# cleanly rather than leave an unrecognized field in the rendered copy.
+	grep -v '^tags:' "$skill_dir/SKILL.md" > "$dst/SKILL.md"
+	echo "dotfiles-sync-agents: rendered $skill_name -> $dst (copilot)"
+}
+
 sync_claude_only_file() {
 	src_file="$1"
 	dst_dir="$2"
@@ -59,7 +83,7 @@ sync_claude_only_file() {
 	echo "dotfiles-sync-agents: rendered $file_name -> $dst"
 }
 
-sync_claude_skills_dir() {
+sync_skills_dir() {
 	skills_src_dir="$1"
 
 	if [ ! -d "$skills_src_dir" ]; then
@@ -69,16 +93,17 @@ sync_claude_skills_dir() {
 	for skill_dir in "$skills_src_dir"/*/; do
 		[ -f "$skill_dir/SKILL.md" ] || continue
 		sync_claude_skill "$skill_dir"
+		sync_copilot_skill "$skill_dir"
 	done
 }
 
 if [ ! -d "$SKILLS_SRC_DIR" ]; then
 	echo "dotfiles-sync-agents: no skills found at $SKILLS_SRC_DIR" >&2
 else
-	sync_claude_skills_dir "$SKILLS_SRC_DIR"
+	sync_skills_dir "$SKILLS_SRC_DIR"
 fi
 
-sync_claude_skills_dir "$LOCAL_SKILLS_SRC_DIR"
+sync_skills_dir "$LOCAL_SKILLS_SRC_DIR"
 
 if [ -d "$SUBAGENTS_SRC_DIR" ]; then
 	for subagent_file in "$SUBAGENTS_SRC_DIR"/*.md(N); do

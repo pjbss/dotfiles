@@ -27,16 +27,18 @@ system for syncing LLM skills to Claude Code and GitHub Copilot.
 - `local/skills/<skill-name>/SKILL.md` — same shape, for private/company
   skills that should never be committed.
 - `bin/dotfiles-sync-agents` — manual command that renders
-  `agents/skills/*/SKILL.md` into `~/.claude/skills/` (and, on other tools,
-  their equivalent). Re-run it any time a skill changes.
+  `agents/skills/*/SKILL.md` into `~/.claude/skills/` (Claude Code) and
+  `~/.copilot/skills/` (GitHub Copilot CLI). Re-run it any time a skill
+  changes.
 
 ## Adding a new skill
 
 1. Create `agents/skills/<skill-name>/SKILL.md` with `name` and
    `description` frontmatter and a markdown body.
-2. Run `dotfiles-sync-agents` to render it into `~/.claude/skills/`.
-3. Start a new Claude Code session (or otherwise reload skills) to pick it
-   up.
+2. Run `dotfiles-sync-agents` to render it into `~/.claude/skills/` and
+   `~/.copilot/skills/`.
+3. Start a new Claude Code or Copilot CLI session (or otherwise reload
+   skills) to pick it up.
 
 ## Adding a new shell module
 
