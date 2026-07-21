@@ -22,10 +22,10 @@ identical to GitHub Copilot CLI's personal-skill format (`name` and
 
 ## Rendering
 
-Run `dotfiles-sync-agents` (added to `PATH` by `zsh/zshrc`) to render every
-skill under `agents/skills/*/SKILL.md` into each supported tool's format.
-This is always a manual, explicit step -- nothing in this repo triggers it
-automatically. Re-run it any time a skill is added or changed.
+`install.sh` runs `dotfiles-sync-agents` automatically at the end of an
+install/update, so every skill is rendered into each supported tool's format
+without an extra step. It's also on `PATH` (via `zsh/zshrc`) to re-run by
+hand any time a skill is added or changed between installs.
 
 - **Claude Code**: `~/.claude/skills/<skill-name>/`, full-fidelity copy
   (frontmatter, body, and any supporting files unchanged).

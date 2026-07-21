@@ -3,8 +3,8 @@
 #
 # Renders tool-neutral skills under agents/skills/<skill-name>/SKILL.md, plus
 # the Claude-only extension layer under agents/claude-only/, into each
-# supported tool's native format. Manual/explicit only -- nothing in this
-# repo runs this automatically.
+# supported tool's native format. Run automatically by install.sh, and safe
+# to re-run manually any time a skill is added or changed.
 #
 # Currently supported targets:
 #   - Claude Code: agents/skills/*/SKILL.md -> ~/.claude/skills/<skill-name>/,

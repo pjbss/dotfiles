@@ -85,3 +85,5 @@ for sub_dir in "$DOTFILES_HOME"/*/; do
 		. "$sub_dir/install.sh"
 	fi
 done
+
+"$DOTFILES_HOME/bin/dotfiles-sync-agents"

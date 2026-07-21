@@ -2,7 +2,7 @@
 GITCONFIG_MARKER="# dotfiles: managed block from $DOTFILES_HOME/git/gitconfig.partial"
 
 if [ -e ~/.gitconfig ] && grep -qF "$GITCONFIG_MARKER" ~/.gitconfig 2>/dev/null; then
-	exit 0
+	return 0
 fi
 
 if [ -e ~/.gitconfig ]; then

@@ -99,8 +99,8 @@ win on a name collision, since they're scanned second) into:
   extension, whose personal-instructions mechanism is currently
   undocumented and inconsistent in practice.
 
-`dotfiles-sync-agents` is always a manual, explicit step -- nothing in this
-repo runs it automatically.
+`dotfiles-sync-agents` also runs automatically at the end of `install.sh`,
+so a fresh install picks up every skill without an extra step.
 
 ### Claude-only extension layer
 
