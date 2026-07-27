@@ -58,25 +58,28 @@ sandbox_allocate_port() {
 	return 1
 }
 
-# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE]
+# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH]
 #
-# Renders a per-task Lima YAML config to stdout: substitutes the SSH port
-# and worktree path placeholders in TEMPLATE, then appends a guest
-# `env: AWS_PROFILE: ...` passthrough stanza -- but only when AWS_PROFILE
-# is non-empty. Lima has no native passthrough of arbitrary host env vars
-# (only a few proxy vars), so this bakes the host's current value in at
-# render time. Omitting the stanza when empty matters: an empty guest
-# AWS_PROFILE makes the AWS CLI look for a profile literally named ""
-# instead of falling back to its default profile.
+# Renders a per-task Lima YAML config to stdout: substitutes the SSH port,
+# worktree path, and this dotfiles repo's own path placeholders in
+# TEMPLATE, then appends a guest `env: AWS_PROFILE: ...` passthrough
+# stanza -- but only when AWS_PROFILE is non-empty. Lima has no native
+# passthrough of arbitrary host env vars (only a few proxy vars), so this
+# bakes the host's current value in at render time. Omitting the stanza
+# when empty matters: an empty guest AWS_PROFILE makes the AWS CLI look
+# for a profile literally named "" instead of falling back to its default
+# profile.
 sandbox_render_lima_config() {
 	template="$1"
 	ssh_port="$2"
 	worktree_path="$3"
 	aws_profile="${4:-}"
+	dotfiles_path="${5:-}"
 
 	sed \
 		-e "s|__SANDBOX_SSH_PORT__|$ssh_port|" \
 		-e "s|__SANDBOX_WORKTREE_PATH__|$worktree_path|" \
+		-e "s|__SANDBOX_DOTFILES_PATH__|$dotfiles_path|" \
 		"$template"
 
 	if [ -n "$aws_profile" ]; then

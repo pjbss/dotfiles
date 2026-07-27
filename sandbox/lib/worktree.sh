@@ -1,10 +1,10 @@
 # worktree.sh
 #
-# Worktree create/attach/resume decision for `dotfiles-sandbox-spawn`
+# Worktree create/attach/resume decision for `pj-sandbox-spawn`
 # (issue 003, amended by issue 010's end-to-end validation pass): the
 # PRD's "teardown destroys the VM only" decision means a task's
 # worktree/branch can already exist on disk at spawn time -- left behind
-# by a prior `dotfiles-sandbox-teardown` -- and spawn must resume it
+# by a prior `pj-sandbox-teardown` -- and spawn must resume it
 # rather than erroring out or trying to re-create it. Separately, a
 # branch can exist with no worktree checked out for it (e.g. the worktree
 # directory was removed by hand, or `git worktree remove` was run without

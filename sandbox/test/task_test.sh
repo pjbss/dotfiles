@@ -119,13 +119,28 @@ case "$rendered_with_profile" in
 *) echo "FAIL: sandbox_render_lima_config passes through a non-empty AWS_PROFILE"; failures=$((failures + 1)) ;;
 esac
 
-rm -f "$fixture_template"
+fixture_template_dotfiles="$(mktemp)"
+cat > "$fixture_template_dotfiles" <<-'EOF'
+mounts:
+- location: "__SANDBOX_DOTFILES_PATH__"
+  mountPoint: "{{.Home}}/dotfiles"
+  writable: false
+EOF
+
+rendered_with_dotfiles="$(sandbox_render_lima_config "$fixture_template_dotfiles" 60099 /tmp/some-worktree '' /tmp/some-dotfiles-checkout)"
+
+case "$rendered_with_dotfiles" in
+*/tmp/some-dotfiles-checkout*) echo "PASS: sandbox_render_lima_config substitutes the dotfiles repo path" ;;
+*) echo "FAIL: sandbox_render_lima_config substitutes the dotfiles repo path"; failures=$((failures + 1)) ;;
+esac
+
+rm -f "$fixture_template" "$fixture_template_dotfiles"
 
 # --- credential mounts in the real base template (issue 004) ---
 
 template_file="$SANDBOX_DIR/lima-template.yaml"
 
-for cred_path in '~/.claude' '~/.config/gh' '~/.aws'; do
+for cred_path in '~/.claude' '~/.config/gh' '~/.copilot' '~/.aws'; do
 	if grep -qF "location: \"$cred_path\"" "$template_file"; then
 		echo "PASS: lima-template.yaml mounts $cred_path"
 	else
@@ -133,6 +148,13 @@ for cred_path in '~/.claude' '~/.config/gh' '~/.aws'; do
 		failures=$((failures + 1))
 	fi
 done
+
+if grep -qF 'location: "__SANDBOX_DOTFILES_PATH__"' "$template_file"; then
+	echo "PASS: lima-template.yaml mounts the dotfiles repo itself"
+else
+	echo "FAIL: lima-template.yaml mounts the dotfiles repo itself"
+	failures=$((failures + 1))
+fi
 
 # Every mount block in the template other than the read-write worktree
 # mount must be explicitly read-only.

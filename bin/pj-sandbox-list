@@ -1,11 +1,11 @@
 #!/bin/sh
-# dotfiles-sandbox-list
+# pj-sandbox-list
 #
 # Lists sandboxes known to this tooling: task name, worktree path, and
 # running/stopped status, correlating the per-task Lima configs
-# dotfiles-sandbox-spawn writes (issue 003) with `limactl list --json`.
+# pj-sandbox-spawn writes (issue 003) with `limactl list --json`.
 #
-# Usage: dotfiles-sandbox-list
+# Usage: pj-sandbox-list
 
 set -eu
 

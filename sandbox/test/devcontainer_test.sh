@@ -2,7 +2,7 @@
 # devcontainer_test.sh
 #
 # Plain-shell unit tests for sandbox/lib/devcontainer.sh (devcontainer.json
-# discovery for `dotfiles-sandbox-spawn`, issue 008). No test framework
+# discovery for `pj-sandbox-spawn`, issue 008). No test framework
 # dependency, same minimal assert style as task_test.sh/list_test.sh.
 
 set -euo pipefail

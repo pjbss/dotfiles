@@ -109,3 +109,69 @@ definitions (`subagents/<name>.md` -> `~/.claude/agents/<name>.md`) and
 Workflow scripts (`workflows/<name>.js` -> `~/.claude/workflows/<name>.js`),
 both rendered at full fidelity into Claude's output only. The Copilot
 adapter never scans this directory, so it's skipped by construction.
+
+## Sandbox (`sandbox/`)
+
+Spins up a disposable, per-task Lima VM with the task's git worktree mounted
+read-write, so an agent (Claude Code or GitHub Copilot CLI) can be given
+free rein without touching the host directly or ever seeing git push
+credentials.
+
+### Commands
+
+- `pj-sandbox-spawn <task-name>` -- creates a new branch + worktree on the
+  host, boots a Lima VM with that worktree mounted read-write, and wires up
+  a VS Code Remote-SSH-ready `ssh <task-name>` entry. If the worktree has a
+  `devcontainer.json`, it's built and run inside the VM via the devcontainer
+  CLI; otherwise the VM is left bare aside from Docker, Node, and the Claude
+  Code/Copilot CLIs (installed unconditionally either way).
+- `pj-sandbox-list` -- lists every sandbox this tooling knows about (task
+  name, worktree path, running/stopped).
+- `pj-sandbox-teardown <task-name>` -- stops and deletes the VM. The
+  worktree and branch are left untouched, so the same task name can be
+  resumed later with another `pj-sandbox-spawn`.
+- `pj-sbx-spawn` / `pj-sbx-list` / `pj-sbx-teardown` -- short aliases for
+  the three commands above (`zsh/modules/sandbox.zsh`).
+- `pj-sbx-ssh <task-name>` -- connects to a running sandbox from a
+  terminal (resolves the same task-name slug spawn/teardown use, then hands
+  off to the system `ssh`).
+
+### What's inside every sandbox
+
+- The task's worktree, mounted read-write at `/workspace`.
+- Claude Code, GitHub CLI, GitHub Copilot CLI, and AWS (`~/.aws` +
+  `$AWS_PROFILE`) config mounted read-only -- never git push credentials or
+  SSH keys.
+- Docker, Node/npm, and the `claude`/`copilot` CLIs, installed
+  unconditionally.
+- This dotfiles repo itself, mounted read-only and bootstrapped inside the
+  VM at spawn time (zsh installed, `install.sh` run, shell set to zsh), so
+  the same aliases/functions are available over SSH as on the host.
+
+### Auth inside the sandbox
+
+`gh`, Claude Code, and Copilot CLI normally store their real credentials in
+the macOS Keychain, which a Linux VM can't reach -- mounting their config
+directories alone isn't enough. `pj-sandbox-spawn` works around this:
+
+- **gh / Copilot CLI**: forwards the host's currently-active `gh auth
+  token` into the VM as `GH_TOKEN`/`GITHUB_TOKEN` at spawn time. Requires
+  `gh auth login` on the host; no extra setup otherwise.
+- **Claude Code**: needs a one-time manual step, since there's no
+  equivalent "current session" token to forward automatically:
+
+      claude setup-token
+      echo '<token from the command above>' > ~/.claude/sandbox-oauth-token
+      chmod 600 ~/.claude/sandbox-oauth-token
+
+  Every sandbox from then on picks this up automatically, since that file
+  rides along on the already-mounted `~/.claude`. Without it, Claude Code
+  still works inside the VM, just via an interactive login the first time.
+
+### Requirements
+
+- macOS (Lima's use here targets this user's Darwin machine).
+- `limactl` (installed automatically by `sandbox/install.sh`, via
+  Homebrew).
+- VS Code with the Remote-SSH extension (and Dev Containers, for projects
+  with a `devcontainer.json`) to connect to a spawned sandbox from an IDE.

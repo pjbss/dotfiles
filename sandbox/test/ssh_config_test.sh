@@ -2,7 +2,7 @@
 # ssh_config_test.sh
 #
 # Plain-shell unit tests for sandbox/lib/ssh_config.sh (VS Code Remote-SSH
-# config generation for `dotfiles-sandbox-spawn`). No test framework
+# config generation for `pj-sandbox-spawn`). No test framework
 # dependency, same minimal assert style as task_test.sh/list_test.sh.
 
 set -euo pipefail
@@ -153,7 +153,7 @@ rm -f "$fixture_include"
 
 fixture_ssh_dir="$(mktemp -d)"
 fixture_ssh_config="$fixture_ssh_dir/config"
-fixture_include_path="$fixture_ssh_dir/dotfiles-sandbox-config"
+fixture_include_path="$fixture_ssh_dir/pj-sandbox-config"
 
 sandbox_ssh_ensure_include "$fixture_include_path" "$fixture_ssh_config"
 
@@ -173,7 +173,7 @@ rm -rf "$fixture_ssh_dir"
 
 fixture_ssh_dir2="$(mktemp -d)"
 fixture_ssh_config2="$fixture_ssh_dir2/config"
-fixture_include_path2="$fixture_ssh_dir2/dotfiles-sandbox-config"
+fixture_include_path2="$fixture_ssh_dir2/pj-sandbox-config"
 
 cat > "$fixture_ssh_config2" <<-'EOF'
 Host github.com

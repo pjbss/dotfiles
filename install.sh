@@ -81,9 +81,25 @@ ensure_installed() {
 ensure_installed fzf fzf
 
 for sub_dir in "$DOTFILES_HOME"/*/; do
+	module_name="$(basename "$sub_dir")"
+
+	# pj-sandbox-spawn runs this same install.sh inside a spawned sandbox VM
+	# (with DOTFILES_SANDBOX_GUEST=1) to give the guest the same aliases as
+	# the host. Skip the sandbox module itself in that case -- there's no
+	# sense installing Lima inside a Lima VM.
+	if [ "$module_name" = "sandbox" ] && [ -n "${DOTFILES_SANDBOX_GUEST:-}" ]; then
+		continue
+	fi
+
 	if [ -f "$sub_dir/install.sh" ]; then
 		. "$sub_dir/install.sh"
 	fi
 done
 
-"$DOTFILES_HOME/bin/dotfiles-sync-agents"
+# Also skipped inside a sandbox VM: pj-sandbox-spawn already mounts the
+# host's ~/.claude and ~/.copilot read-only, so the guest sees the host's
+# already-synced skills/subagents live; re-running this here would just
+# fail writing into those same read-only mounts.
+if [ -z "${DOTFILES_SANDBOX_GUEST:-}" ]; then
+	"$DOTFILES_HOME/bin/dotfiles-sync-agents"
+fi

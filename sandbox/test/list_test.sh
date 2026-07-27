@@ -2,7 +2,7 @@
 # list_test.sh
 #
 # Plain-shell unit tests for sandbox/lib/list.sh (sandbox discovery/status
-# correlation for `dotfiles-sandbox-list`). No test framework dependency,
+# correlation for `pj-sandbox-list`). No test framework dependency,
 # same minimal assert style as task_test.sh.
 
 set -euo pipefail

@@ -1,6 +1,6 @@
 # devcontainer.sh
 #
-# devcontainer.json discovery for `dotfiles-sandbox-spawn` (issue 008): the
+# devcontainer.json discovery for `pj-sandbox-spawn` (issue 008): the
 # PRD's "devcontainer-or-bare, no generic fallback" runtime-provisioning
 # decision hinges on detecting whether the task's project defines one, at
 # either of the devcontainer CLI's two conventional discovery locations.

@@ -1,8 +1,8 @@
 # list.sh
 #
-# Sandbox discovery/listing logic for `dotfiles-sandbox-list`: enumerates
+# Sandbox discovery/listing logic for `pj-sandbox-list`: enumerates
 # sandboxes known to this tooling (rendered per-task Lima configs under a
-# sandbox root, written by dotfiles-sandbox-spawn/issue 003) and
+# sandbox root, written by pj-sandbox-spawn/issue 003) and
 # correlates them with `limactl list --json` for live status. Meant to be
 # sourced, not executed directly.
 
@@ -11,7 +11,7 @@
 # For every "<root>/<repo>/lima-configs/<instance>.yaml" found, prints one
 # tab-separated line: "<instance>\t<worktree-path>\t<status>", where
 # worktree-path is "<root>/<repo>/worktrees/<instance>" (the layout
-# dotfiles-sandbox-spawn writes, issue 003) and status is whatever
+# pj-sandbox-spawn writes, issue 003) and status is whatever
 # `limactl list --json` reports for that instance name, or "stopped" if
 # limactl has no record of it (e.g. the VM was torn down but the render
 # artifact and worktree still exist -- issue 007 decides whether that

@@ -2,17 +2,24 @@
 #
 # Base Lima VM config for dotfiles sandbox tasks (issue 003). An Ubuntu VM
 # with the task's worktree mounted read-write, plus read-only host
-# credential mounts (issue 004: Claude Code auth, GitHub CLI auth, AWS
-# config/SSO cache -- no git credentials or SSH keys, by PRD design), plus
-# Docker provisioned on every VM regardless of whether the project has a
+# credential mounts (issue 004: Claude Code auth, GitHub CLI auth, GitHub
+# Copilot CLI auth, AWS config/SSO cache -- no git credentials or SSH
+# keys, by PRD design), plus Docker and the Claude Code/GitHub Copilot
+# CLIs provisioned on every VM regardless of whether the project has a
 # devcontainer.json (issue 008's "Docker available in every spawned VM"
-# acceptance criterion). Devcontainer detection, installing Node/npm/the
-# devcontainer CLI, and running `devcontainer up` when a devcontainer.json
-# is actually found is dotfiles-sandbox-spawn's job, not this template's.
-# dotfiles-sandbox-spawn renders this file per task via
+# acceptance criterion, extended to cover the agent CLIs the mounted
+# credentials above are for -- otherwise those mounts have nothing to
+# authenticate). This dotfiles repo itself is also mounted read-only, so
+# pj-sandbox-spawn can bootstrap the same zsh aliases/functions inside the
+# VM as on the host, without giving the guest write access back to the
+# host checkout. Devcontainer detection, installing the devcontainer CLI,
+# and running `devcontainer up` when a devcontainer.json is actually found
+# is pj-sandbox-spawn's job, not this template's.
+# pj-sandbox-spawn renders this file per task via
 # sandbox_render_lima_config (sandbox/lib/task.sh), substituting
-# __SANDBOX_SSH_PORT__ and __SANDBOX_WORKTREE_PATH__ and appending an
-# AWS_PROFILE passthrough stanza, then runs `limactl start` on the result.
+# __SANDBOX_SSH_PORT__, __SANDBOX_WORKTREE_PATH__, and
+# __SANDBOX_DOTFILES_PATH__ and appending an AWS_PROFILE passthrough
+# stanza, then runs `limactl start` on the result.
 
 minimumLimaVersion: 2.0.0
 
@@ -32,18 +39,30 @@ mounts:
 - location: "~/.config/gh"
   mountPoint: "{{.Home}}/.config/gh"
   writable: false
+- location: "~/.copilot"
+  mountPoint: "{{.Home}}/.copilot"
+  writable: false
 - location: "~/.aws"
   mountPoint: "{{.Home}}/.aws"
   writable: false
+- location: "__SANDBOX_DOTFILES_PATH__"
+  mountPoint: "{{.Home}}/dotfiles"
+  writable: false
 
-# Docker, unconditionally (issue 008: "Docker itself is available inside
-# every spawned VM regardless of whether the specific project has a
-# devcontainer"). This is the one exception to "bare VM, no auto-installed
-# tooling" for projects without a devcontainer.json -- the Node/npm/
-# devcontainer-CLI install that `devcontainer up` itself needs is done by
-# dotfiles-sandbox-spawn only when a devcontainer.json is actually found,
-# not baked in here. Runs on every boot, guarded by a `command -v` check so
-# re-boots of an already-provisioned VM are a cheap no-op.
+# Docker, Node/npm, and the Claude Code/GitHub Copilot CLIs, unconditionally
+# (issue 008: "Docker itself is available inside every spawned VM regardless
+# of whether the specific project has a devcontainer" -- extended here to
+# the two agent CLIs, since without them the read-only ~/.claude and
+# ~/.config/gh credential mounts above have nothing installed to use them).
+# This is the exception to "bare VM, no auto-installed tooling" for projects
+# without a devcontainer.json -- the extra devcontainer-CLI install that
+# `devcontainer up` itself needs is still done by pj-sandbox-spawn only when
+# a devcontainer.json is actually found, not baked in here. Runs on every
+# boot as root (mode: system), guarded by `command -v` checks so re-boots
+# of an already-provisioned VM are a cheap no-op; installing as root here
+# (rather than via sudo from the regular user, as pj-sandbox-spawn's
+# devcontainer-CLI install does) lands both npm globals under /usr, on
+# every user's PATH.
 provision:
 - mode: system
   script: |
@@ -53,3 +72,16 @@ provision:
       curl -fsSL https://get.docker.com | sh
     fi
     usermod -aG docker {{.User}}
+
+    if ! command -v node >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y nodejs npm
+    fi
+
+    if ! command -v claude >/dev/null 2>&1; then
+      npm install -g @anthropic-ai/claude-code
+    fi
+
+    if ! command -v copilot >/dev/null 2>&1; then
+      npm install -g @github/copilot
+    fi

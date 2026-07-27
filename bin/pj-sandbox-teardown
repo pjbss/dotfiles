@@ -1,14 +1,14 @@
 #!/bin/sh
-# dotfiles-sandbox-teardown
+# pj-sandbox-teardown
 #
 # Tears down a sandbox's Lima VM: stops and deletes the VM (issue 003) and
 # removes its VS Code Remote-SSH entry (issue 005). Deliberately leaves the
 # git worktree and branch untouched -- only the render artifact under
 # lima-configs/ is removed, so the task disappears from
-# `dotfiles-sandbox-list` (issue 006) while the worktree/branch persist for
-# a future `dotfiles-sandbox-spawn` against the same task name.
+# `pj-sandbox-list` (issue 006) while the worktree/branch persist for
+# a future `pj-sandbox-spawn` against the same task name.
 #
-# Usage: dotfiles-sandbox-teardown <task-name>
+# Usage: pj-sandbox-teardown <task-name>
 
 set -eu
 
@@ -22,12 +22,12 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 task_name="${1:-}"
 if [ -z "$task_name" ]; then
-	echo "usage: dotfiles-sandbox-teardown <task-name>" >&2
+	echo "usage: pj-sandbox-teardown <task-name>" >&2
 	exit 1
 fi
 
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-	echo "dotfiles-sandbox-teardown: must be run from inside a git repository" >&2
+	echo "pj-sandbox-teardown: must be run from inside a git repository" >&2
 	exit 1
 fi
 
@@ -40,17 +40,17 @@ sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}/$repo_name"
 vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
 
 if [ ! -e "$vm_config" ]; then
-	echo "dotfiles-sandbox-teardown: no sandbox named '$instance_name' found" >&2
+	echo "pj-sandbox-teardown: no sandbox named '$instance_name' found" >&2
 	exit 1
 fi
 
-echo "dotfiles-sandbox-teardown: stopping and deleting Lima VM '$instance_name'..."
+echo "pj-sandbox-teardown: stopping and deleting Lima VM '$instance_name'..."
 limactl stop "$instance_name"
 limactl delete "$instance_name"
 
-ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/dotfiles-sandbox-config}"
+ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/pj-sandbox-config}"
 sandbox_ssh_remove_entry "$ssh_include_file" "$instance_name"
 
 rm -f "$vm_config"
 
-echo "dotfiles-sandbox-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"
+echo "pj-sandbox-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"
