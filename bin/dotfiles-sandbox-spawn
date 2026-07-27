@@ -22,6 +22,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 . "$DOTFILES_HOME/sandbox/lib/task.sh"
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
 . "$DOTFILES_HOME/sandbox/lib/devcontainer.sh"
+. "$DOTFILES_HOME/sandbox/lib/worktree.sh"
 
 task_name="${1:-}"
 if [ -z "$task_name" ]; then
@@ -51,15 +52,26 @@ sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}/$repo_name"
 worktree_path="$sandbox_root/worktrees/$instance_name"
 vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
 
-if [ -e "$worktree_path" ]; then
-	echo "dotfiles-sandbox-spawn: worktree path '$worktree_path' already exists -- pick a different task name or remove it first" >&2
-	exit 1
-fi
-
 mkdir -p "$sandbox_root/worktrees" "$sandbox_root/lima-configs"
 
-echo "dotfiles-sandbox-spawn: creating branch '$instance_name' and worktree at '$worktree_path'..."
-git -C "$repo_root" worktree add -b "$instance_name" "$worktree_path"
+worktree_action="$(sandbox_resolve_worktree_action "$repo_root" "$worktree_path" "$instance_name")" || {
+	echo "dotfiles-sandbox-spawn: '$worktree_path' exists but isn't a registered git worktree of this repo -- pick a different task name or remove it first" >&2
+	exit 1
+}
+
+case "$worktree_action" in
+	resume)
+		echo "dotfiles-sandbox-spawn: resuming branch/worktree at '$worktree_path' (left behind by a prior teardown)..."
+		;;
+	attach)
+		echo "dotfiles-sandbox-spawn: branch '$instance_name' already exists -- attaching a new worktree at '$worktree_path'..."
+		git -C "$repo_root" worktree add "$worktree_path" "$instance_name"
+		;;
+	*)
+		echo "dotfiles-sandbox-spawn: creating branch '$instance_name' and worktree at '$worktree_path'..."
+		git -C "$repo_root" worktree add -b "$instance_name" "$worktree_path"
+		;;
+esac
 
 ssh_port="$(sandbox_allocate_port)"
 
