@@ -147,6 +147,31 @@ limactl shell "$instance_name" -- sh -c '
 	fi
 	DOTFILES_SANDBOX_GUEST=1 "$HOME/dotfiles/install.sh"
 	sudo chsh -s "$(command -v zsh)" "$(whoami)"
+
+	# The chsh command above only takes effect for a brand-new login
+	# session -- but every ssh/limactl-shell connection to this VM,
+	# including ones from a fresh terminal, is multiplexed over the single
+	# SSH ControlMaster connection Lima opens during boot, long before this
+	# script ever runs. An account attribute change made after that point
+	# (same root cause as the docker-group timing issue worked around with
+	# sudo in the devcontainer block below) never surfaces for any session
+	# over that connection, no matter how many times a user reconnects, for
+	# the whole life of the VM. There is no sudo-equivalent sidestep for
+	# which shell a session lands in, so instead of fighting the stale
+	# connection, make bash -- whatever the account landed in -- hand off
+	# to zsh itself, since bash re-reads its own startup file fresh on
+	# every login, unlike the cached account attribute chsh changes.
+	#
+	# NOTE: this block runs as the single-quoted argument to a host-level
+	# sh -c invocation -- it must never contain a literal apostrophe, or it
+	# will prematurely close that outer quoting and corrupt every line
+	# after it (confirmed the hard way; keep phrasing apostrophe-free).
+	bash_login_file="$HOME/.profile"
+	[ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
+	[ -f "$HOME/.bash_profile" ] && bash_login_file="$HOME/.bash_profile"
+	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sandbox-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
+		printf "\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session.\nif [ -z \"\$ZSH_VERSION\" ] && command -v zsh >/dev/null 2>&1; then\n\texec zsh -l\nfi\n" >> "$bash_login_file"
+	fi
 '
 
 if devcontainer_config="$(sandbox_devcontainer_config_path "$worktree_path")"; then
