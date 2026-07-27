@@ -22,13 +22,21 @@ parse_git_dirty() {
 }
 
 
-# Shows the number of worktrees for the current repo. No-op outside a git
-# repo, and when there's only the one (primary) worktree.
-function git_prompt_worktree_count() {
+# Shows the name of the current git worktree. No-op outside a git repo, and
+# when there's only the one (primary) worktree.
+function git_prompt_worktree_name() {
   local count
   count=$(git worktree list 2> /dev/null | wc -l | tr -d ' ')
   [[ -z "$count" || "$count" -le 1 ]] && return
-  echo "$ZSH_THEME_GIT_PROMPT_WORKTREE_PREFIX$count$ZSH_THEME_GIT_PROMPT_WORKTREE_SUFFIX"
+  local git_dir name
+  git_dir=$(git rev-parse --git-dir 2> /dev/null) || return
+  if [[ "$git_dir" == */worktrees/* ]]; then
+    name="${git_dir##*/worktrees/}"
+  else
+    name=$(basename "$(git rev-parse --show-toplevel 2> /dev/null)")
+  fi
+  [[ -z "$name" ]] && return
+  echo "$ZSH_THEME_GIT_PROMPT_WORKTREE_PREFIX$name$ZSH_THEME_GIT_PROMPT_WORKTREE_SUFFIX"
 }
 
 # Shows ahead/behind commit counts vs. the current branch's upstream. No-op
