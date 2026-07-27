@@ -1,0 +1,28 @@
+#!/bin/sh
+# dotfiles-sandbox-list
+#
+# Lists sandboxes known to this tooling: task name, worktree path, and
+# running/stopped status, correlating the per-task Lima configs
+# dotfiles-sandbox-spawn writes (issue 003) with `limactl list --json`.
+#
+# Usage: dotfiles-sandbox-list
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/list.sh"
+
+sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}"
+
+entries="$(sandbox_list_entries "$sandbox_root")"
+
+if [ -z "$entries" ]; then
+	echo "no sandboxes found"
+	exit 0
+fi
+
+printf 'TASK\tWORKTREE\tSTATUS\n%s\n' "$entries" | awk -F'\t' '{ printf "%-24s %-50s %s\n", $1, $2, $3 }'

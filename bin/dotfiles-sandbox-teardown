@@ -1,0 +1,56 @@
+#!/bin/sh
+# dotfiles-sandbox-teardown
+#
+# Tears down a sandbox's Lima VM: stops and deletes the VM (issue 003) and
+# removes its VS Code Remote-SSH entry (issue 005). Deliberately leaves the
+# git worktree and branch untouched -- only the render artifact under
+# lima-configs/ is removed, so the task disappears from
+# `dotfiles-sandbox-list` (issue 006) while the worktree/branch persist for
+# a future `dotfiles-sandbox-spawn` against the same task name.
+#
+# Usage: dotfiles-sandbox-teardown <task-name>
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/task.sh"
+. "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
+
+task_name="${1:-}"
+if [ -z "$task_name" ]; then
+	echo "usage: dotfiles-sandbox-teardown <task-name>" >&2
+	exit 1
+fi
+
+if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+	echo "dotfiles-sandbox-teardown: must be run from inside a git repository" >&2
+	exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+
+instance_name="$(sandbox_instance_name "$task_name")"
+
+sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}/$repo_name"
+vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
+
+if [ ! -e "$vm_config" ]; then
+	echo "dotfiles-sandbox-teardown: no sandbox named '$instance_name' found" >&2
+	exit 1
+fi
+
+echo "dotfiles-sandbox-teardown: stopping and deleting Lima VM '$instance_name'..."
+limactl stop "$instance_name"
+limactl delete "$instance_name"
+
+ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/dotfiles-sandbox-config}"
+sandbox_ssh_remove_entry "$ssh_include_file" "$instance_name"
+
+rm -f "$vm_config"
+
+echo "dotfiles-sandbox-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"

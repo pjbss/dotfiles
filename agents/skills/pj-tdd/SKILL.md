@@ -52,7 +52,7 @@ Repeat per behavior identified above:
 - **Full completion**: check off every `- [ ]` to `- [x]` in the issue
   file, run the full test suite once more, add a `## Resolution notes`
   section describing what was actually built/decided (especially anything
-  that deviated from the original "What to build"), then `git mv` the file
+  that deviated from the original "What to build"), then move the file
   into `issues/done/`.
 - **Partial completion** (some criteria are HITL-only per the flag above):
   leave those specific boxes unchecked, add a `## Notes (autonomous pass,

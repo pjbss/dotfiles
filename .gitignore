@@ -5,3 +5,6 @@
 
 # machine-local, company-specific config (see zsh/zshrc, git/install.sh)
 /local/
+
+# issue tracking files
+issues/*

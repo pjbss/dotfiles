@@ -1,0 +1,55 @@
+# lima-template.yaml
+#
+# Base Lima VM config for dotfiles sandbox tasks (issue 003). An Ubuntu VM
+# with the task's worktree mounted read-write, plus read-only host
+# credential mounts (issue 004: Claude Code auth, GitHub CLI auth, AWS
+# config/SSO cache -- no git credentials or SSH keys, by PRD design), plus
+# Docker provisioned on every VM regardless of whether the project has a
+# devcontainer.json (issue 008's "Docker available in every spawned VM"
+# acceptance criterion). Devcontainer detection, installing Node/npm/the
+# devcontainer CLI, and running `devcontainer up` when a devcontainer.json
+# is actually found is dotfiles-sandbox-spawn's job, not this template's.
+# dotfiles-sandbox-spawn renders this file per task via
+# sandbox_render_lima_config (sandbox/lib/task.sh), substituting
+# __SANDBOX_SSH_PORT__ and __SANDBOX_WORKTREE_PATH__ and appending an
+# AWS_PROFILE passthrough stanza, then runs `limactl start` on the result.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+ssh:
+  localPort: __SANDBOX_SSH_PORT__
+
+mounts:
+- location: "__SANDBOX_WORKTREE_PATH__"
+  mountPoint: "/workspace"
+  writable: true
+- location: "~/.claude"
+  mountPoint: "{{.Home}}/.claude"
+  writable: false
+- location: "~/.config/gh"
+  mountPoint: "{{.Home}}/.config/gh"
+  writable: false
+- location: "~/.aws"
+  mountPoint: "{{.Home}}/.aws"
+  writable: false
+
+# Docker, unconditionally (issue 008: "Docker itself is available inside
+# every spawned VM regardless of whether the specific project has a
+# devcontainer"). This is the one exception to "bare VM, no auto-installed
+# tooling" for projects without a devcontainer.json -- the Node/npm/
+# devcontainer-CLI install that `devcontainer up` itself needs is done by
+# dotfiles-sandbox-spawn only when a devcontainer.json is actually found,
+# not baked in here. Runs on every boot, guarded by a `command -v` check so
+# re-boots of an already-provisioned VM are a cheap no-op.
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    if ! command -v docker >/dev/null 2>&1; then
+      curl -fsSL https://get.docker.com | sh
+    fi
+    usermod -aG docker {{.User}}
