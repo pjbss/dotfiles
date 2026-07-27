@@ -25,6 +25,14 @@
 # under the already-mounted ~/.claude). Without it, Claude Code still
 # works inside the VM, just via an interactive login the first time.
 #
+# All of the above -- the forwarded gh/Claude tokens and making zsh the
+# active shell -- are exported/exec'd from the guest's own bash login file
+# rather than via `/etc/environment`/`chsh`, since this VM's single SSH
+# ControlMaster connection (opened by Lima at boot) makes every later
+# session reuse whatever PAM/passwd read at that original connection time,
+# no matter how many times you reconnect (confirmed directly; see the
+# comment above the relevant block below for the full explanation).
+#
 # Usage: pj-sandbox-spawn <task-name>
 
 set -eu
@@ -108,39 +116,70 @@ ssh_block="$(sandbox_ssh_render_host_block "$instance_name" "$lima_ssh_config")"
 sandbox_ssh_write_entry "$ssh_include_file" "$instance_name" "$ssh_block"
 sandbox_ssh_ensure_include "$ssh_include_file" "$ssh_config_file"
 
-# Forward the host's currently-active `gh` auth token into the VM so `gh`
-# and the Copilot CLI (which both accept GH_TOKEN/GITHUB_TOKEN in place of
-# their own login) work without a fresh device-flow login inside the VM --
-# both otherwise store their real credential in the host's macOS Keychain,
-# which the mounted ~/.config/gh and ~/.copilot directories above can't
-# carry into a Linux guest. Piped over stdin (never as a `limactl shell`
-# argument or written to any file on the host) so the token never appears
-# in host `ps` output, shell history, or the per-task Lima config on disk.
+# Capture the host's currently-active `gh` auth token, to forward into the
+# VM below so `gh` and the Copilot CLI (which both accept GH_TOKEN/
+# GITHUB_TOKEN in place of their own login) work without a fresh
+# device-flow login inside the VM -- both otherwise store their real
+# credential in the host's macOS Keychain, which the mounted ~/.config/gh
+# and ~/.copilot directories above can't carry into a Linux guest. Held in
+# a host shell variable only (never written to a file on the host) and
+# piped into the VM over stdin below, so it never appears in host `ps`
+# output, shell history, or the per-task Lima config on disk.
+gh_token=""
 if command -v gh >/dev/null 2>&1 && gh_token="$(gh auth token 2>/dev/null)" && [ -n "$gh_token" ]; then
 	echo "pj-sandbox-spawn: forwarding the host's active 'gh' auth token into the VM for gh/Copilot CLI..."
-	printf 'GH_TOKEN=%s\nGITHUB_TOKEN=%s\n' "$gh_token" "$gh_token" | limactl shell "$instance_name" -- sudo tee -a /etc/environment >/dev/null
 else
 	echo "pj-sandbox-spawn: host 'gh' isn't authenticated -- gh/Copilot CLI will need a fresh login inside the VM"
 fi
-unset gh_token
 
 # Bootstrap this dotfiles repo inside the VM (mounted read-only above) so
-# the guest gets the same zsh aliases/functions as the host, then wire up
-# Claude Code's long-lived auth token if the user has opted in (see the
-# pj-sandbox-spawn header/README for the one-time `claude setup-token`
-# step -- CLAUDE_CODE_OAUTH_TOKEN can't be forwarded from the host's
-# session the way GH_TOKEN is above, since it's meant to be a distinct,
-# revocable credential rather than a copy of the host's own live session).
-# DOTFILES_SANDBOX_GUEST=1 tells install.sh to skip the sandbox/ module
-# (no Lima-inside-Lima) and skip dotfiles-sync-agents (the guest already
-# sees the host's synced skills live via the read-only ~/.claude/~/.copilot
+# the guest gets the same zsh aliases/functions as the host, wire up
+# forwarded auth (the gh token captured above, plus Claude Code's
+# long-lived token if the user has opted in -- see the pj-sandbox-spawn
+# header/README for the one-time `claude setup-token` step), and make zsh
+# the shell every session actually lands in.
+#
+# All three of those (env vars, login shell) are account/session-level
+# things that would normally be set via `/etc/environment` (PAM) and
+# `chsh`. Neither actually reaches a real session on this VM: every ssh/
+# limactl-shell connection, including ones from a brand-new terminal, is
+# multiplexed over the single SSH ControlMaster connection Lima opens
+# during boot, long before this script ever runs -- and whatever PAM/
+# passwd read at that original connection time is what every later session
+# over it keeps getting, for the VMs entire life (confirmed directly: same
+# root cause as the docker-group timing issue worked around with sudo in
+# the devcontainer block below). So instead of fighting that stale
+# connection, this writes the exports and a bash-to-zsh handoff directly
+# into the guest's own bash login file, which bash re-reads fresh on every
+# single login regardless of what the original connection cached.
+#
+# DOTFILES_SANDBOX_GUEST=1 tells install.sh to skip the sandbox/ module (no
+# Lima-inside-Lima) and skip dotfiles-sync-agents (the guest already sees
+# the host's synced skills live via the read-only ~/.claude/~/.copilot
 # mounts, and a rewrite there would fail against those same mounts anyway).
-echo "pj-sandbox-spawn: bootstrapping dotfiles (zsh aliases/functions) inside the VM..."
-limactl shell "$instance_name" -- sh -c '
+#
+# Runs over plain `ssh` (the Host entry just written above), not
+# `limactl shell` -- confirmed directly that `limactl shell instance --
+# sh -c '...'` does not reliably forward piped stdin to the wrapped
+# command (it appears to swallow it as if typed at an interactive prompt
+# instead), where plain ssh does not have that problem. The gh token
+# travels as a positional argument (`sh -s -- "$gh_token"`, so it is
+# available inside the script as $1) rather than over stdin, since stdin
+# here is the script's own source (`sh -s` reads its script from stdin) --
+# mixing a script's source and a `read` command's input on the same
+# stream is unreliable (confirmed directly: a shell reading a piped script
+# does not necessarily do so strictly line-by-line, so an embedded `read`
+# can end up consuming bytes the interpreter itself still needed).
+echo "pj-sandbox-spawn: bootstrapping dotfiles and forwarded auth inside the VM..."
+ssh "$instance_name" sh -s -- "$gh_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 	set -eu
+	gh_token_in="${1:-}"
+
+	claude_token=""
 	if [ -f "$HOME/.claude/sandbox-oauth-token" ]; then
-		printf "CLAUDE_CODE_OAUTH_TOKEN=%s\n" "$(cat "$HOME/.claude/sandbox-oauth-token")" | sudo tee -a /etc/environment >/dev/null
+		claude_token="$(cat "$HOME/.claude/sandbox-oauth-token")"
 	fi
+
 	if ! command -v zsh >/dev/null 2>&1; then
 		sudo apt-get update
 		sudo apt-get install -y zsh
@@ -148,31 +187,25 @@ limactl shell "$instance_name" -- sh -c '
 	DOTFILES_SANDBOX_GUEST=1 "$HOME/dotfiles/install.sh"
 	sudo chsh -s "$(command -v zsh)" "$(whoami)"
 
-	# The chsh command above only takes effect for a brand-new login
-	# session -- but every ssh/limactl-shell connection to this VM,
-	# including ones from a fresh terminal, is multiplexed over the single
-	# SSH ControlMaster connection Lima opens during boot, long before this
-	# script ever runs. An account attribute change made after that point
-	# (same root cause as the docker-group timing issue worked around with
-	# sudo in the devcontainer block below) never surfaces for any session
-	# over that connection, no matter how many times a user reconnects, for
-	# the whole life of the VM. There is no sudo-equivalent sidestep for
-	# which shell a session lands in, so instead of fighting the stale
-	# connection, make bash -- whatever the account landed in -- hand off
-	# to zsh itself, since bash re-reads its own startup file fresh on
-	# every login, unlike the cached account attribute chsh changes.
-	#
-	# NOTE: this block runs as the single-quoted argument to a host-level
-	# sh -c invocation -- it must never contain a literal apostrophe, or it
-	# will prematurely close that outer quoting and corrupt every line
-	# after it (confirmed the hard way; keep phrasing apostrophe-free).
 	bash_login_file="$HOME/.profile"
 	[ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
 	[ -f "$HOME/.bash_profile" ] && bash_login_file="$HOME/.bash_profile"
-	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sandbox-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
-		printf "\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session.\nif [ -z \"\$ZSH_VERSION\" ] && command -v zsh >/dev/null 2>&1; then\n\texec zsh -l\nfi\n" >> "$bash_login_file"
+
+	if ! grep -qF "pj-sandbox-spawn: forwarded host auth" "$bash_login_file" 2>/dev/null; then
+		printf '\n# pj-sandbox-spawn: forwarded host auth -- exported here rather than via\n# /etc/environment, since that never reaches a real session on this VM.\n' >> "$bash_login_file"
+		if [ -n "$gh_token_in" ]; then
+			printf 'export GH_TOKEN="%s"\nexport GITHUB_TOKEN="%s"\n' "$gh_token_in" "$gh_token_in" >> "$bash_login_file"
+		fi
+		if [ -n "$claude_token" ]; then
+			printf 'export CLAUDE_CODE_OAUTH_TOKEN="%s"\n' "$claude_token" >> "$bash_login_file"
+		fi
 	fi
-'
+
+	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sandbox-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
+		printf '\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session.\nif [ -z "$ZSH_VERSION" ] && command -v zsh >/dev/null 2>&1; then\n\texec zsh -l\nfi\n' >> "$bash_login_file"
+	fi
+	PJSANDBOX_GUEST_BOOTSTRAP
+unset gh_token
 
 if devcontainer_config="$(sandbox_devcontainer_config_path "$worktree_path")"; then
 	echo "pj-sandbox-spawn: devcontainer.json found ($devcontainer_config) -- installing the devcontainer CLI and running 'devcontainer up' inside the VM..."
