@@ -21,9 +21,11 @@
 #   claude setup-token
 #   echo '<token from above>' > ~/.claude/sandbox-oauth-token
 #   chmod 600 ~/.claude/sandbox-oauth-token
-# Every sandbox VM picks that file up automatically from then on (it lives
-# under the already-mounted ~/.claude). Without it, Claude Code still
-# works inside the VM, just via an interactive login the first time.
+# Every future spawn picks that file up automatically from then on (read
+# from the host here, the same way the gh token below is, since ~/.claude
+# itself is deliberately not mounted into the VM -- see lima-template.yaml).
+# Without it, Claude Code still works inside the VM, just via an
+# interactive login the first time.
 #
 # All of the above -- the forwarded gh/Claude tokens and making zsh the
 # active shell -- are exported/exec'd from the guest's own bash login file
@@ -132,6 +134,19 @@ else
 	echo "pj-sandbox-spawn: host 'gh' isn't authenticated -- gh/Copilot CLI will need a fresh login inside the VM"
 fi
 
+# Same idea for Claude Code's long-lived sandbox token (see the header
+# comment above for the one-time `claude setup-token` step): read here on
+# the host, held only in this shell variable, and forwarded alongside the
+# gh token below -- ~/.claude is deliberately not mounted into the VM (see
+# lima-template.yaml), so the guest can no longer read this file itself.
+claude_token=""
+if [ -f "$HOME/.claude/sandbox-oauth-token" ]; then
+	claude_token="$(cat "$HOME/.claude/sandbox-oauth-token")"
+	echo "pj-sandbox-spawn: forwarding the host's Claude Code sandbox token into the VM..."
+else
+	echo "pj-sandbox-spawn: no ~/.claude/sandbox-oauth-token on the host -- Claude Code will need an interactive login inside the VM"
+fi
+
 # Bootstrap this dotfiles repo inside the VM (mounted read-only above) so
 # the guest gets the same zsh aliases/functions as the host, wire up
 # forwarded auth (the gh token captured above, plus Claude Code's
@@ -154,31 +169,29 @@ fi
 # single login regardless of what the original connection cached.
 #
 # DOTFILES_SANDBOX_GUEST=1 tells install.sh to skip the sandbox/ module (no
-# Lima-inside-Lima) and skip dotfiles-sync-agents (the guest already sees
-# the host's synced skills live via the read-only ~/.claude/~/.copilot
-# mounts, and a rewrite there would fail against those same mounts anyway).
+# Lima-inside-Lima); dotfiles-sync-agents still runs normally here, since
+# ~/.claude/~/.copilot are ordinary writable directories in the guest, not
+# read-only mounts -- it renders this repo's skills/subagents straight
+# from the read-only ~/dotfiles mount, same as it would on the host.
 #
 # Runs over plain `ssh` (the Host entry just written above), not
 # `limactl shell` -- confirmed directly that `limactl shell instance --
 # sh -c '...'` does not reliably forward piped stdin to the wrapped
 # command (it appears to swallow it as if typed at an interactive prompt
-# instead), where plain ssh does not have that problem. The gh token
-# travels as a positional argument (`sh -s -- "$gh_token"`, so it is
-# available inside the script as $1) rather than over stdin, since stdin
-# here is the script's own source (`sh -s` reads its script from stdin) --
-# mixing a script's source and a `read` command's input on the same
-# stream is unreliable (confirmed directly: a shell reading a piped script
-# does not necessarily do so strictly line-by-line, so an embedded `read`
-# can end up consuming bytes the interpreter itself still needed).
+# instead), where plain ssh does not have that problem. The gh and Claude
+# tokens travel as positional arguments (`sh -s -- "$gh_token"
+# "$claude_token"`, so they are available inside the script as $1/$2)
+# rather than over stdin, since stdin here is the script's own source
+# (`sh -s` reads its script from stdin) -- mixing a script's source and a
+# `read` command's input on the same stream is unreliable (confirmed
+# directly: a shell reading a piped script does not necessarily do so
+# strictly line-by-line, so an embedded `read` can end up consuming bytes
+# the interpreter itself still needed).
 echo "pj-sandbox-spawn: bootstrapping dotfiles and forwarded auth inside the VM..."
-ssh "$instance_name" sh -s -- "$gh_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
+ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 	set -eu
 	gh_token_in="${1:-}"
-
-	claude_token=""
-	if [ -f "$HOME/.claude/sandbox-oauth-token" ]; then
-		claude_token="$(cat "$HOME/.claude/sandbox-oauth-token")"
-	fi
+	claude_token_in="${2:-}"
 
 	if ! command -v zsh >/dev/null 2>&1; then
 		sudo apt-get update
@@ -186,6 +199,25 @@ ssh "$instance_name" sh -s -- "$gh_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 	fi
 	DOTFILES_SANDBOX_GUEST=1 "$HOME/dotfiles/install.sh"
 	sudo chsh -s "$(command -v zsh)" "$(whoami)"
+
+	# Registers Atlassian's official remote MCP server (Jira/Confluence) so
+	# Claude Code inside the VM can see it -- but only registers it, doesn't
+	# authenticate it. The claude.ai account-level Atlassian connector (what
+	# an interactively-logged-in `claude` session sees automatically) is
+	# documented to never load when CLAUDE_CODE_OAUTH_TOKEN is the active
+	# credential ("can only make model requests" -- code.claude.com/docs/en/
+	# authentication), so that connector can't be forwarded the way the
+	# oauth token above is. Its OAuth token also isn't a portable string like
+	# CLAUDE_CODE_OAUTH_TOKEN -- it lands in a local credentials file/keychain
+	# entry -- so unlike the tokens above, this needs a one-time interactive
+	# login per spawned VM: run `claude mcp login atlassian --no-browser`
+	# over `ssh -t <task-name>`, open the printed URL on this Mac, and paste
+	# the resulting redirect URL back at the VM's prompt. `--scope user`
+	# keeps this registration available across every project/worktree the
+	# guest user touches, rather than just the current one.
+	if command -v claude >/dev/null 2>&1 && ! claude mcp list 2>/dev/null | grep -q '^atlassian'; then
+		claude mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2 --scope user
+	fi
 
 	bash_login_file="$HOME/.profile"
 	[ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
@@ -196,16 +228,28 @@ ssh "$instance_name" sh -s -- "$gh_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 		if [ -n "$gh_token_in" ]; then
 			printf 'export GH_TOKEN="%s"\nexport GITHUB_TOKEN="%s"\n' "$gh_token_in" "$gh_token_in" >> "$bash_login_file"
 		fi
-		if [ -n "$claude_token" ]; then
-			printf 'export CLAUDE_CODE_OAUTH_TOKEN="%s"\n' "$claude_token" >> "$bash_login_file"
+		if [ -n "$claude_token_in" ]; then
+			printf 'export CLAUDE_CODE_OAUTH_TOKEN="%s"\n' "$claude_token_in" >> "$bash_login_file"
 		fi
 	fi
 
+	# Guarded by PJSANDBOX_ZSH_HANDED_OFF (exported right before the exec, so
+	# every descendant process inherits it) rather than just `-z
+	# "$ZSH_VERSION"` -- Claude Code's own Bash tool sources this same
+	# profile to initialize each shell it spawns inside the VM (confirmed:
+	# its tool description says exactly this), and without the marker, every
+	# one of those child bash processes would re-trigger `exec zsh -l` and
+	# hang waiting on a real terminal it doesn't have (confirmed directly:
+	# this is what "Bash is stalling" inside a spawned VM turned out to be).
+	# The marker makes the handoff fire exactly once, for the genuine
+	# top-level interactive SSH login -- every child process of that login
+	# (including `claude` and everything its Bash tool spawns) inherits the
+	# marker and skips the exec, running as plain bash instead.
 	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sandbox-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
-		printf '\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session.\nif [ -z "$ZSH_VERSION" ] && command -v zsh >/dev/null 2>&1; then\n\texec zsh -l\nfi\n' >> "$bash_login_file"
+		printf '\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session. Guarded by an\n# inherited marker, not just $ZSH_VERSION, so tools that source this same\n# profile to init a child shell (e.g. Claude Code'"'"'s own Bash tool) don'"'"'t\n# get hijacked into a terminal-less interactive zsh and hang.\nif [ -z "$ZSH_VERSION" ] && [ -z "$PJSANDBOX_ZSH_HANDED_OFF" ] && command -v zsh >/dev/null 2>&1; then\n\texport PJSANDBOX_ZSH_HANDED_OFF=1\n\texec zsh -l\nfi\n' >> "$bash_login_file"
 	fi
 	PJSANDBOX_GUEST_BOOTSTRAP
-unset gh_token
+unset gh_token claude_token
 
 if devcontainer_config="$(sandbox_devcontainer_config_path "$worktree_path")"; then
 	echo "pj-sandbox-spawn: devcontainer.json found ($devcontainer_config) -- installing the devcontainer CLI and running 'devcontainer up' inside the VM..."
@@ -233,3 +277,4 @@ else
 fi
 
 echo "pj-sandbox-spawn: sandbox '$instance_name' is up (worktree: $worktree_path, ssh port: $ssh_port) -- run 'ssh $instance_name' or 'pj-sbx-ssh $task_name' to connect"
+echo "pj-sandbox-spawn: to read Jira/Confluence tickets from inside the VM, run 'ssh -t $instance_name claude mcp login atlassian --no-browser', open the printed URL here, and paste the redirect URL back at the prompt (one-time per VM spawn -- this auth can't be forwarded like the gh/Claude tokens)"

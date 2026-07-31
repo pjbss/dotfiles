@@ -2,19 +2,33 @@
 #
 # Base Lima VM config for dotfiles sandbox tasks (issue 003). An Ubuntu VM
 # with the task's worktree mounted read-write, plus read-only host
-# credential mounts (issue 004: Claude Code auth, GitHub CLI auth, GitHub
-# Copilot CLI auth, AWS config/SSO cache -- no git credentials or SSH
-# keys, by PRD design), plus Docker and the Claude Code/GitHub Copilot
-# CLIs provisioned on every VM regardless of whether the project has a
-# devcontainer.json (issue 008's "Docker available in every spawned VM"
-# acceptance criterion, extended to cover the agent CLIs the mounted
-# credentials above are for -- otherwise those mounts have nothing to
-# authenticate). This dotfiles repo itself is also mounted read-only, so
-# pj-sandbox-spawn can bootstrap the same zsh aliases/functions inside the
-# VM as on the host, without giving the guest write access back to the
-# host checkout. Devcontainer detection, installing the devcontainer CLI,
-# and running `devcontainer up` when a devcontainer.json is actually found
-# is pj-sandbox-spawn's job, not this template's.
+# credential mounts (issue 004: GitHub CLI auth, AWS config/SSO cache --
+# no git credentials or SSH keys, by PRD design), plus Docker and the
+# Claude Code/GitHub CLI/GitHub Copilot CLIs provisioned on every VM
+# regardless of whether the project has a devcontainer.json (issue 008's
+# "Docker available in every spawned VM" acceptance criterion, extended to
+# cover the agent CLIs).
+#
+# ~/.claude and ~/.copilot are deliberately NOT mounted from the host,
+# unlike ~/.config/gh and ~/.aws: almost everything under those two
+# directories (transcripts, memory, todos, shell-snapshots, session
+# state/caches, Copilot's session-store.db) is runtime-writable, so a
+# read-only mount there fails with EROFS the moment either CLI actually
+# runs. Both are left as normal, VM-local, writable directories instead.
+# What those mounts were actually carrying -- the Claude Code long-lived
+# auth token, and the dotfiles-managed skills/subagents -- is forwarded a
+# different way: pj-sandbox-spawn exports CLAUDE_CODE_OAUTH_TOKEN (read
+# from the host's ~/.claude/sandbox-oauth-token, forwarded the same way as
+# the gh token below), and the guest bootstrap runs this repo's own
+# dotfiles-sync-agents against the read-only ~/dotfiles mount below, same
+# as it would on the host.
+#
+# This dotfiles repo itself is also mounted read-only, so pj-sandbox-spawn
+# can bootstrap the same zsh aliases/functions inside the VM as on the
+# host, without giving the guest write access back to the host checkout.
+# Devcontainer detection, installing the devcontainer CLI, and running
+# `devcontainer up` when a devcontainer.json is actually found is
+# pj-sandbox-spawn's job, not this template's.
 # pj-sandbox-spawn renders this file per task via
 # sandbox_render_lima_config (sandbox/lib/task.sh), substituting
 # __SANDBOX_SSH_PORT__, __SANDBOX_WORKTREE_PATH__, and
@@ -33,14 +47,8 @@ mounts:
 - location: "__SANDBOX_WORKTREE_PATH__"
   mountPoint: "/workspace"
   writable: true
-- location: "~/.claude"
-  mountPoint: "{{.Home}}/.claude"
-  writable: false
 - location: "~/.config/gh"
   mountPoint: "{{.Home}}/.config/gh"
-  writable: false
-- location: "~/.copilot"
-  mountPoint: "{{.Home}}/.copilot"
   writable: false
 - location: "~/.aws"
   mountPoint: "{{.Home}}/.aws"
@@ -49,20 +57,21 @@ mounts:
   mountPoint: "{{.Home}}/dotfiles"
   writable: false
 
-# Docker, Node/npm, and the Claude Code/GitHub Copilot CLIs, unconditionally
-# (issue 008: "Docker itself is available inside every spawned VM regardless
-# of whether the specific project has a devcontainer" -- extended here to
-# the two agent CLIs, since without them the read-only ~/.claude and
-# ~/.config/gh credential mounts above have nothing installed to use them).
-# This is the exception to "bare VM, no auto-installed tooling" for projects
-# without a devcontainer.json -- the extra devcontainer-CLI install that
-# `devcontainer up` itself needs is still done by pj-sandbox-spawn only when
-# a devcontainer.json is actually found, not baked in here. Runs on every
-# boot as root (mode: system), guarded by `command -v` checks so re-boots
-# of an already-provisioned VM are a cheap no-op; installing as root here
-# (rather than via sudo from the regular user, as pj-sandbox-spawn's
-# devcontainer-CLI install does) lands both npm globals under /usr, on
-# every user's PATH.
+# Docker, Node/npm, and the Claude Code/GitHub CLI/GitHub Copilot CLIs,
+# unconditionally (issue 008: "Docker itself is available inside every
+# spawned VM regardless of whether the specific project has a
+# devcontainer" -- extended here to the three agent-facing CLIs, since
+# without them the ~/.config/gh credential mount and the forwarded
+# GH_TOKEN/CLAUDE_CODE_OAUTH_TOKEN env vars have nothing installed to use
+# them). This is the exception to "bare VM, no auto-installed tooling" for
+# projects without a devcontainer.json -- the extra devcontainer-CLI
+# install that `devcontainer up` itself needs is still done by
+# pj-sandbox-spawn only when a devcontainer.json is actually found, not
+# baked in here. Runs on every boot as root (mode: system), guarded by
+# `command -v` checks so re-boots of an already-provisioned VM are a cheap
+# no-op; installing as root here (rather than via sudo from the regular
+# user, as pj-sandbox-spawn's devcontainer-CLI install does) lands both
+# npm globals under /usr, on every user's PATH.
 provision:
 - mode: system
   script: |
@@ -84,4 +93,12 @@ provision:
 
     if ! command -v copilot >/dev/null 2>&1; then
       npm install -g @github/copilot
+    fi
+
+    if ! command -v gh >/dev/null 2>&1; then
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+      chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+      apt-get update
+      apt-get install -y gh
     fi

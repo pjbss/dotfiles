@@ -140,12 +140,26 @@ rm -f "$fixture_template" "$fixture_template_dotfiles"
 
 template_file="$SANDBOX_DIR/lima-template.yaml"
 
-for cred_path in '~/.claude' '~/.config/gh' '~/.copilot' '~/.aws'; do
+for cred_path in '~/.config/gh' '~/.aws'; do
 	if grep -qF "location: \"$cred_path\"" "$template_file"; then
 		echo "PASS: lima-template.yaml mounts $cred_path"
 	else
 		echo "FAIL: lima-template.yaml mounts $cred_path"
 		failures=$((failures + 1))
+	fi
+done
+
+# ~/.claude and ~/.copilot are deliberately NOT host-mounted: almost
+# everything under them is runtime-writable (transcripts, session state,
+# caches), so a read-only mount fails with EROFS the moment either CLI
+# runs. Auth/skills reach the guest a different way (forwarded oauth
+# token, dotfiles-sync-agents) instead of a live mount.
+for non_cred_path in '~/.claude' '~/.copilot'; do
+	if grep -qF "location: \"$non_cred_path\"" "$template_file"; then
+		echo "FAIL: lima-template.yaml does not mount $non_cred_path"
+		failures=$((failures + 1))
+	else
+		echo "PASS: lima-template.yaml does not mount $non_cred_path"
 	fi
 done
 

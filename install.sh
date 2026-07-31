@@ -96,10 +96,8 @@ for sub_dir in "$DOTFILES_HOME"/*/; do
 	fi
 done
 
-# Also skipped inside a sandbox VM: pj-sandbox-spawn already mounts the
-# host's ~/.claude and ~/.copilot read-only, so the guest sees the host's
-# already-synced skills/subagents live; re-running this here would just
-# fail writing into those same read-only mounts.
-if [ -z "${DOTFILES_SANDBOX_GUEST:-}" ]; then
-	"$DOTFILES_HOME/bin/dotfiles-sync-agents"
-fi
+# Runs in a sandbox VM guest too (DOTFILES_SANDBOX_GUEST=1): ~/.claude and
+# ~/.copilot are ordinary writable directories there, not mounts, so this
+# renders the guest's own copy of skills/subagents straight from this repo
+# (mounted read-only at ~/dotfiles by pj-sandbox-spawn), same as on the host.
+"$DOTFILES_HOME/bin/dotfiles-sync-agents"
