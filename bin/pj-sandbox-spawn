@@ -27,6 +27,15 @@
 # Without it, Claude Code still works inside the VM, just via an
 # interactive login the first time.
 #
+# Separately, this also seeds the guest's onboarding/bypass-permissions
+# disclaimer state directly into ~/.claude.json (see the guest bootstrap
+# below): CLAUDE_CODE_OAUTH_TOKEN alone does not skip Claude Code's
+# first-run onboarding wizard on a brand-new VM, and even accepting the
+# bypass-permissions disclaimer interactively once didn't reliably persist
+# (confirmed directly against two spawned sandboxes). With this seeded,
+# `claude --bg "<prompt>" --dangerously-skip-permissions` works headlessly
+# with zero manual intervention per VM.
+#
 # All of the above -- the forwarded gh/Claude tokens and making zsh the
 # active shell -- are exported/exec'd from the guest's own bash login file
 # rather than via `/etc/environment`/`chsh`, since this VM's single SSH
@@ -48,6 +57,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
 . "$DOTFILES_HOME/sandbox/lib/devcontainer.sh"
 . "$DOTFILES_HOME/sandbox/lib/worktree.sh"
+. "$DOTFILES_HOME/sandbox/lib/workspace.sh"
 
 task_name="${1:-}"
 if [ -z "$task_name" ]; then
@@ -62,6 +72,17 @@ fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 repo_name="$(basename "$repo_root")"
+
+# The repo's real (common) git directory -- NOT repo_root itself. A linked
+# worktree's `.git` is a file pointing at an absolute host path under this
+# directory (`.../worktrees/<name>`), so the VM needs this exact directory
+# mounted at the same absolute path for any git command inside the spawned
+# worktree to work at all (see sandbox_render_lima_config's doc comment
+# and lima-template.yaml for the full explanation). Resolved via `cd` into
+# whatever (possibly relative) path `--git-common-dir` reports, rather
+# than assuming "$repo_root/.git" directly, so this also works correctly
+# if repo_root is itself already a linked worktree of some other repo.
+repo_gitdir="$(cd "$repo_root" && cd "$(git rev-parse --git-common-dir)" && pwd)"
 
 # The same slug is used as the branch name, worktree directory name, and
 # Lima instance name -- one canonical identifier per task rather than three
@@ -98,6 +119,16 @@ case "$worktree_action" in
 		;;
 esac
 
+# If the source repo has a <repo_name>.code-workspace file at its root,
+# copy it into the new worktree (overwriting any copy `git worktree add`
+# already placed there if it happened to be tracked) so VS Code can be
+# opened against the sandboxed worktree directly. No-op, no output, if
+# the source repo has no such file.
+workspace_path=""
+if workspace_source="$(sandbox_workspace_source_path "$repo_root")"; then
+	workspace_path="$(sandbox_workspace_write "$workspace_source" "$repo_root" "$worktree_path")"
+fi
+
 ssh_port="$(sandbox_allocate_port)"
 
 sandbox_render_lima_config \
@@ -105,7 +136,8 @@ sandbox_render_lima_config \
 	"$ssh_port" \
 	"$worktree_path" \
 	"${AWS_PROFILE:-}" \
-	"$DOTFILES_HOME" > "$vm_config"
+	"$DOTFILES_HOME" \
+	"$repo_gitdir" > "$vm_config"
 
 echo "pj-sandbox-spawn: starting Lima VM '$instance_name' (SSH port $ssh_port)..."
 limactl start --name "$instance_name" --tty=false "$vm_config"
@@ -233,6 +265,31 @@ ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BO
 		fi
 	fi
 
+	# Seed onboarding/disclaimer state directly into Claude Code's own
+	# config so `claude --bg ... --dangerously-skip-permissions` works
+	# headlessly with zero manual intervention on a fresh VM. Without this,
+	# CLAUDE_CODE_OAUTH_TOKEN alone does not skip the first-run onboarding
+	# wizard on a brand-new VM -- launching interactively goes theme picker
+	# -> "Select login method" -> a dead-end browser OAuth prompt
+	# headlessly, never even reaching the actual bypass-permissions
+	# disclaimer. Separately, even reaching and accepting that disclaimer
+	# interactively once didn't reliably persist to ~/.claude.json on a
+	# later launch (confirmed directly against two spawned sandboxes).
+	# `bypassPermissionsModeAccepted` is the exact field name `claude --bg`'s
+	# disclaimer check reads (found via `strings` on the installed binary
+	# near its "requires accepting the disclaimer" error text) --
+	# `hasCompletedOnboarding` additionally skips the wizard outright.
+	# Setting both directly makes headless dispatch work immediately, no
+	# interactive step needed at all.
+	claude_version="$(claude --version 2>/dev/null | awk '{print $1}')"
+	python3 -c '
+import json, os, sys
+path = os.path.expanduser("~/.claude.json")
+d = json.load(open(path)) if os.path.exists(path) else {}
+d.update(hasCompletedOnboarding=True, lastOnboardingVersion=sys.argv[1], bypassPermissionsModeAccepted=True)
+json.dump(d, open(path, "w"), indent=2)
+' "$claude_version"
+
 	# Guarded by PJSANDBOX_ZSH_HANDED_OFF (exported right before the exec, so
 	# every descendant process inherits it) rather than just `-z
 	# "$ZSH_VERSION"` -- Claude Code's own Bash tool sources this same
@@ -277,4 +334,7 @@ else
 fi
 
 echo "pj-sandbox-spawn: sandbox '$instance_name' is up (worktree: $worktree_path, ssh port: $ssh_port) -- run 'ssh $instance_name' or 'pj-sbx-ssh $task_name' to connect"
+if [ -n "$workspace_path" ]; then
+	echo "pj-sandbox-spawn: VS Code workspace file written to $workspace_path"
+fi
 echo "pj-sandbox-spawn: to read Jira/Confluence tickets from inside the VM, run 'ssh -t $instance_name claude mcp login atlassian --no-browser', open the printed URL here, and paste the redirect URL back at the prompt (one-time per VM spawn -- this auth can't be forwarded like the gh/Claude tokens)"

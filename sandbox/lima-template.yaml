@@ -29,11 +29,23 @@
 # Devcontainer detection, installing the devcontainer CLI, and running
 # `devcontainer up` when a devcontainer.json is actually found is
 # pj-sandbox-spawn's job, not this template's.
+#
+# The spawning repo's real git directory (__SANDBOX_REPO_GITDIR__) is also
+# mounted, read-write, at the identical absolute host path -- a linked
+# worktree's `.git` is a *file* containing `gitdir: <that same absolute
+# host path>/worktrees/<name>`, baked in by `git worktree add` at creation
+# time. Without this mount, that reference is unreachable and every git
+# command inside /workspace fails outright (confirmed directly against a
+# real spawned sandbox -- see sandbox/lib/task.sh's
+# sandbox_render_lima_config doc comment). Read-write because git commands
+# that actually run inside the worktree (commit, checkout, merge) write
+# into this shared object/ref store, not just into /workspace itself.
+#
 # pj-sandbox-spawn renders this file per task via
 # sandbox_render_lima_config (sandbox/lib/task.sh), substituting
-# __SANDBOX_SSH_PORT__, __SANDBOX_WORKTREE_PATH__, and
-# __SANDBOX_DOTFILES_PATH__ and appending an AWS_PROFILE passthrough
-# stanza, then runs `limactl start` on the result.
+# __SANDBOX_SSH_PORT__, __SANDBOX_WORKTREE_PATH__,
+# __SANDBOX_DOTFILES_PATH__, and __SANDBOX_REPO_GITDIR__, and appending an
+# AWS_PROFILE passthrough stanza, then runs `limactl start` on the result.
 
 minimumLimaVersion: 2.0.0
 
@@ -56,6 +68,9 @@ mounts:
 - location: "__SANDBOX_DOTFILES_PATH__"
   mountPoint: "{{.Home}}/dotfiles"
   writable: false
+- location: "__SANDBOX_REPO_GITDIR__"
+  mountPoint: "__SANDBOX_REPO_GITDIR__"
+  writable: true
 
 # Docker, Node/npm, and the Claude Code/GitHub CLI/GitHub Copilot CLIs,
 # unconditionally (issue 008: "Docker itself is available inside every

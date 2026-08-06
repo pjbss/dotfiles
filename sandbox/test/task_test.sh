@@ -134,7 +134,22 @@ case "$rendered_with_dotfiles" in
 *) echo "FAIL: sandbox_render_lima_config substitutes the dotfiles repo path"; failures=$((failures + 1)) ;;
 esac
 
-rm -f "$fixture_template" "$fixture_template_dotfiles"
+fixture_template_gitdir="$(mktemp)"
+cat > "$fixture_template_gitdir" <<-'EOF'
+mounts:
+- location: "__SANDBOX_REPO_GITDIR__"
+  mountPoint: "__SANDBOX_REPO_GITDIR__"
+  writable: true
+EOF
+
+rendered_with_gitdir="$(sandbox_render_lima_config "$fixture_template_gitdir" 60099 /tmp/some-worktree '' '' /tmp/some-repo/.git)"
+
+case "$rendered_with_gitdir" in
+*/tmp/some-repo/.git*) echo "PASS: sandbox_render_lima_config substitutes the repo git-common-dir path" ;;
+*) echo "FAIL: sandbox_render_lima_config substitutes the repo git-common-dir path"; failures=$((failures + 1)) ;;
+esac
+
+rm -f "$fixture_template" "$fixture_template_dotfiles" "$fixture_template_gitdir"
 
 # --- credential mounts in the real base template (issue 004) ---
 
@@ -170,10 +185,20 @@ else
 	failures=$((failures + 1))
 fi
 
-# Every mount block in the template other than the read-write worktree
-# mount must be explicitly read-only.
+if grep -qF 'location: "__SANDBOX_REPO_GITDIR__"' "$template_file" && grep -qF 'mountPoint: "__SANDBOX_REPO_GITDIR__"' "$template_file"; then
+	echo "PASS: lima-template.yaml mounts the spawning repo's real git directory at the same absolute path"
+else
+	echo "FAIL: lima-template.yaml mounts the spawning repo's real git directory at the same absolute path"
+	failures=$((failures + 1))
+fi
+
+# Exactly two mounts may be writable: the worktree itself, and the repo's
+# real git directory (needed for any git command inside the worktree to
+# work at all -- a linked worktree's `.git` file points at an absolute
+# host path inside it; see sandbox_render_lima_config's doc comment).
+# Every other mount must be explicitly read-only.
 writable_true_count="$(grep -c 'writable: true' "$template_file")"
-assert_eq "1" "$writable_true_count" "lima-template.yaml has exactly one writable:true mount (the worktree)"
+assert_eq "2" "$writable_true_count" "lima-template.yaml has exactly two writable:true mounts (the worktree and the repo git directory)"
 
 if grep -qE '\.ssh|git-credential|GIT_' "$template_file"; then
 	echo "FAIL: lima-template.yaml contains no git/SSH credential references"

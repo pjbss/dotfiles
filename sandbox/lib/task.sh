@@ -58,28 +58,39 @@ sandbox_allocate_port() {
 	return 1
 }
 
-# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH]
+# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH] [REPO_GITDIR]
 #
 # Renders a per-task Lima YAML config to stdout: substitutes the SSH port,
-# worktree path, and this dotfiles repo's own path placeholders in
-# TEMPLATE, then appends a guest `env: AWS_PROFILE: ...` passthrough
-# stanza -- but only when AWS_PROFILE is non-empty. Lima has no native
-# passthrough of arbitrary host env vars (only a few proxy vars), so this
-# bakes the host's current value in at render time. Omitting the stanza
-# when empty matters: an empty guest AWS_PROFILE makes the AWS CLI look
-# for a profile literally named "" instead of falling back to its default
-# profile.
+# worktree path, this dotfiles repo's own path, and the spawning repo's
+# real git directory placeholders in TEMPLATE, then appends a guest
+# `env: AWS_PROFILE: ...` passthrough stanza -- but only when AWS_PROFILE
+# is non-empty. Lima has no native passthrough of arbitrary host env vars
+# (only a few proxy vars), so this bakes the host's current value in at
+# render time. Omitting the stanza when empty matters: an empty guest
+# AWS_PROFILE makes the AWS CLI look for a profile literally named ""
+# instead of falling back to its default profile.
+#
+# REPO_GITDIR must be the spawning repo's real (common) git directory --
+# `git -C REPO_ROOT rev-parse --git-common-dir`, resolved to an absolute
+# path -- not REPO_ROOT itself. A linked worktree's `.git` is a *file*
+# containing `gitdir: <absolute-host-path>/.git/worktrees/<name>`, and
+# every git operation inside the worktree needs that exact absolute path
+# to resolve (confirmed directly: git inside a spawned VM failed outright
+# without this, since /workspace alone can't satisfy that reference --
+# see the mount this substitutes into in lima-template.yaml).
 sandbox_render_lima_config() {
 	template="$1"
 	ssh_port="$2"
 	worktree_path="$3"
 	aws_profile="${4:-}"
 	dotfiles_path="${5:-}"
+	repo_gitdir="${6:-}"
 
 	sed \
 		-e "s|__SANDBOX_SSH_PORT__|$ssh_port|" \
 		-e "s|__SANDBOX_WORKTREE_PATH__|$worktree_path|" \
 		-e "s|__SANDBOX_DOTFILES_PATH__|$dotfiles_path|" \
+		-e "s|__SANDBOX_REPO_GITDIR__|$repo_gitdir|" \
 		"$template"
 
 	if [ -n "$aws_profile" ]; then
