@@ -90,6 +90,15 @@ mounts:
 # user) lands both npm globals under /usr, on every user's PATH, and
 # `git lfs install --system` under /etc, for every user rather than just
 # the one running it.
+#
+# The npm global prefix is chowned to the guest user at the end (rather
+# than left root-owned) because `claude`/`copilot` run as that regular
+# user, not root: their own built-in auto-updaters rewrite files under
+# that same prefix, and root ownership makes that fail with npm's
+# `no_permissions` (confirmed via `claude doctor` against a real spawned
+# sandbox). Sandboxes are single-guest-user VMs, so handing the one user
+# write access to a root-installed, PATH-wide npm prefix has no meaningful
+# security downside here.
 provision:
 - mode: system
   script: |
@@ -126,6 +135,9 @@ provision:
       apt-get install -y git-lfs
     fi
     git lfs install --system
+
+    npm_prefix="$(npm config get prefix)"
+    chown -R {{.User}}:"$(id -gn {{.User}})" "$npm_prefix/lib/node_modules" "$npm_prefix/bin" 2>/dev/null || true
 # The spawn's `--base <name>` provisioning (issue 003), spliced in here by
 # sandbox_render_lima_config: a second `provision:` list item (its own
 # `- mode: system` / `script: |` ...) from sandbox/templates/<name>, or
