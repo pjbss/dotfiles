@@ -45,9 +45,11 @@
 #
 # --base <name> is required and single-valued (no comma-separated/combined
 # templates): it selects one of the named provisioning templates under
-# sandbox/templates/ (see sandbox/lib/base_template.sh), e.g. `python3.12`,
-# `python3.14`, or `none` for today's bare-VM provisioning made an
-# explicit, nameable choice. `--base list` prints every valid name (one
+# sandbox/templates/ (see sandbox/lib/base_template.sh), including `none`
+# for today's bare-VM provisioning made an explicit, nameable choice.
+# `--help`/`-h` lists every currently-valid name below (read straight from
+# sandbox/templates/, so it can't drift out of sync as templates are
+# added/removed); `--base list` prints that same list on its own (one name
 # per line) and exits, without requiring a task name or touching any
 # branch/worktree/VM.
 #
@@ -68,11 +70,17 @@ BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
+. "$DOTFILES_HOME/sandbox/lib/base_template.sh"
+
+templates_dir="$DOTFILES_HOME/sandbox/templates"
 
 for arg in "$@"; do
 	case "$arg" in
 		--help | -h)
 			sandbox_script_help "$SOURCE"
+			echo
+			echo "Available --base names:"
+			sandbox_base_template_list "$templates_dir" | sed 's/^/  /'
 			exit 0
 			;;
 	esac
@@ -82,9 +90,6 @@ done
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
 . "$DOTFILES_HOME/sandbox/lib/worktree.sh"
 . "$DOTFILES_HOME/sandbox/lib/workspace.sh"
-. "$DOTFILES_HOME/sandbox/lib/base_template.sh"
-
-templates_dir="$DOTFILES_HOME/sandbox/templates"
 
 task_name=""
 base_name=""

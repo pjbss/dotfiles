@@ -174,6 +174,22 @@ esac
 rm -f "$real_templates_dir/$fixture_template_name"
 trap - EXIT
 
+# --- --help also picks up a new template file with no code change ---
+
+trap 'rm -f "$real_templates_dir/$fixture_template_name"' EXIT
+
+touch "$real_templates_dir/$fixture_template_name"
+
+run_spawn --help
+
+case "$spawn_output" in
+*"$fixture_template_name"*) echo "PASS: pj-sbx-spawn --help lists a newly-added sandbox/templates/ file with no code change" ;;
+*) echo "FAIL: pj-sbx-spawn --help lists a newly-added sandbox/templates/ file with no code change (got: $spawn_output)"; failures=$((failures + 1)) ;;
+esac
+
+rm -f "$real_templates_dir/$fixture_template_name"
+trap - EXIT
+
 # --- --help / -h (issue 007) ---
 
 for help_flag in --help -h; do
@@ -190,6 +206,18 @@ for help_flag in --help -h; do
 	*"pj-sbx-spawn"*"Usage: pj-sbx-spawn"*) echo "PASS: pj-sbx-spawn $help_flag prints its header comment as usage" ;;
 	*) echo "FAIL: pj-sbx-spawn $help_flag prints its header comment as usage (got: $spawn_output)"; failures=$((failures + 1)) ;;
 	esac
+
+	case "$spawn_output" in
+	*"--ports"*) echo "PASS: pj-sbx-spawn $help_flag documents --ports" ;;
+	*) echo "FAIL: pj-sbx-spawn $help_flag documents --ports (got: $spawn_output)"; failures=$((failures + 1)) ;;
+	esac
+
+	for expected_name in $(ls -1 "$DOTFILES_HOME/sandbox/templates"); do
+		case "$spawn_output" in
+		*"$expected_name"*) echo "PASS: pj-sbx-spawn $help_flag lists --base name '$expected_name'" ;;
+		*) echo "FAIL: pj-sbx-spawn $help_flag lists --base name '$expected_name' (got: $spawn_output)"; failures=$((failures + 1)) ;;
+		esac
+	done
 
 	assert_no_worktree_created "pj-sbx-spawn $help_flag creates no worktree"
 done
