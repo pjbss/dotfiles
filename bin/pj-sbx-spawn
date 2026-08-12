@@ -118,7 +118,7 @@ if [ "$base_name" = "list" ]; then
 fi
 
 if [ -z "$task_name" ]; then
-	echo "usage: pj-sbx-spawn <task-name> --base <name>" >&2
+	echo "usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] -- valid --base names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
 	exit 1
 fi
 

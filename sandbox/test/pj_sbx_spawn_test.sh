@@ -61,6 +61,31 @@ assert_no_worktree_created() {
 	fi
 }
 
+# --- task name omitted entirely ---
+
+run_spawn
+
+if [ "$spawn_rc" -ne 0 ]; then
+	echo "PASS: pj-sbx-spawn exits non-zero when the task name is omitted"
+else
+	echo "FAIL: pj-sbx-spawn exits non-zero when the task name is omitted"
+	failures=$((failures + 1))
+fi
+
+case "$spawn_output" in
+*--ports*) echo "PASS: pj-sbx-spawn's missing-task-name usage mentions --ports" ;;
+*) echo "FAIL: pj-sbx-spawn's missing-task-name usage mentions --ports (got: $spawn_output)"; failures=$((failures + 1)) ;;
+esac
+
+for expected_name in $(ls -1 "$DOTFILES_HOME/sandbox/templates"); do
+	case "$spawn_output" in
+	*"$expected_name"*) echo "PASS: pj-sbx-spawn's missing-task-name usage lists --base name '$expected_name'" ;;
+	*) echo "FAIL: pj-sbx-spawn's missing-task-name usage lists --base name '$expected_name' (got: $spawn_output)"; failures=$((failures + 1)) ;;
+	esac
+done
+
+assert_no_worktree_created "pj-sbx-spawn creates no worktree when the task name is omitted"
+
 # --- --base omitted entirely ---
 
 run_spawn missing-base-task
