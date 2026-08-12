@@ -148,7 +148,6 @@ if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-repo_name="$(basename "$repo_root")"
 
 # The repo's real (common) git directory -- NOT repo_root itself. A linked
 # worktree's `.git` is a file pointing at an absolute host path under this
@@ -160,6 +159,17 @@ repo_name="$(basename "$repo_root")"
 # than assuming "$repo_root/.git" directly, so this also works correctly
 # if repo_root is itself already a linked worktree of some other repo.
 repo_gitdir="$(cd "$repo_root" && cd "$(git rev-parse --git-common-dir)" && pwd)"
+
+# repo_name is the *origin* repo's directory name -- derived from
+# repo_gitdir's parent, not repo_root's own basename, since repo_root is
+# that same already-a-linked-worktree case repo_gitdir's own comment
+# above accounts for: --show-toplevel there returns the worktree's own
+# path (e.g. .../worktrees/wtools-781), whose basename is the task name,
+# not the repo name. Nesting a spawn inside one of this tool's own spawned
+# worktrees would otherwise write into the wrong sandbox_root entirely
+# (confirmed against pj-sbx-teardown hitting the identical bug for a real
+# already-existing sandbox).
+repo_name="$(basename "$(dirname "$repo_gitdir")")"
 
 # The same slug is used as the branch name, worktree directory name, and
 # Lima instance name -- one canonical identifier per task rather than three

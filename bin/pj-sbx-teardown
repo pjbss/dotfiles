@@ -43,7 +43,20 @@ if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-repo_name="$(basename "$repo_root")"
+
+# repo_name is the *origin* repo's directory name, not repo_root's own
+# basename -- resolved via --git-common-dir rather than --show-toplevel so
+# this still finds the right sandbox_root when pj-sbx-teardown is run from
+# inside one of the tool's own spawned worktrees (e.g.
+# ~/.sandbox-worktrees/fire/worktrees/wtools-781): --show-toplevel there
+# returns that worktree's own path, whose basename is the task name
+# ("wtools-781"), not the repo name ("fire") -- confirmed directly, where
+# it caused a real, already-existing sandbox to be reported as not found.
+# --git-common-dir, by contrast, always resolves to the original repo's
+# shared .git directory regardless of which worktree it's invoked from
+# (see pj-sbx-spawn's repo_gitdir, which relies on the same property).
+repo_gitdir="$(cd "$repo_root" && cd "$(git rev-parse --git-common-dir)" && pwd)"
+repo_name="$(basename "$(dirname "$repo_gitdir")")"
 
 instance_name="$(sandbox_instance_name "$task_name")"
 
