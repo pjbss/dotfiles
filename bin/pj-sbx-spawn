@@ -1,15 +1,12 @@
 #!/bin/sh
-# pj-sandbox-spawn
+# pj-sbx-spawn
 #
 # Spawns an isolated per-task sandbox: a new git branch + worktree on the
 # host, plus an ephemeral Lima VM (booted from sandbox/lima-template.yaml)
 # with that worktree mounted read-write, Claude Code/GitHub CLI/GitHub
 # Copilot CLI/AWS credentials mounted read-only, Docker plus the Claude
 # Code and GitHub Copilot CLIs provisioned unconditionally, and a VS Code
-# Remote-SSH-ready `ssh <task-name>` entry -- plus, if the worktree's
-# project defines a devcontainer.json (issue 008), the devcontainer CLI
-# installed and that devcontainer built/running via `devcontainer up`
-# before this returns.
+# Remote-SSH-ready `ssh <task-name>` entry.
 #
 # Also forwards the host's active `gh` auth token into the VM (so gh/
 # Copilot CLI don't need a fresh login) and bootstraps this dotfiles repo
@@ -44,7 +41,24 @@
 # no matter how many times you reconnect (confirmed directly; see the
 # comment above the relevant block below for the full explanation).
 #
-# Usage: pj-sandbox-spawn <task-name>
+# Usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--help|-h]
+#
+# --base <name> is required and single-valued (no comma-separated/combined
+# templates): it selects one of the named provisioning templates under
+# sandbox/templates/ (see sandbox/lib/base_template.sh), e.g. `python3.12`,
+# `python3.14`, or `none` for today's bare-VM provisioning made an
+# explicit, nameable choice. `--base list` prints every valid name (one
+# per line) and exits, without requiring a task name or touching any
+# branch/worktree/VM.
+#
+# --ports <comma-separated-list> is optional: each listed guest port (e.g.
+# `--ports 8000,5432`) is forwarded to a distinct, dynamically-allocated
+# free host port (sandbox_allocate_ports, sandbox/lib/task.sh), never
+# reusing a host port already claimed by another running sandbox -- so the
+# same project can run in multiple sandboxes at once without their
+# forwarded ports colliding. The resulting host<->guest mapping is printed
+# once the VM is up. Omitting `--ports` leaves forwarding unchanged
+# (SSH-only).
 
 set -eu
 
@@ -53,20 +67,83 @@ while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
 . "$DOTFILES_HOME/sandbox/lib/task.sh"
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
-. "$DOTFILES_HOME/sandbox/lib/devcontainer.sh"
 . "$DOTFILES_HOME/sandbox/lib/worktree.sh"
 . "$DOTFILES_HOME/sandbox/lib/workspace.sh"
+. "$DOTFILES_HOME/sandbox/lib/base_template.sh"
 
-task_name="${1:-}"
+templates_dir="$DOTFILES_HOME/sandbox/templates"
+
+task_name=""
+base_name=""
+ports_arg=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--base)
+			base_name="${2:-}"
+			shift 2
+			;;
+		--ports)
+			ports_arg="${2:-}"
+			shift 2
+			;;
+		*)
+			task_name="$1"
+			shift
+			;;
+	esac
+done
+
+if [ "$base_name" = "list" ]; then
+	sandbox_base_template_list "$templates_dir"
+	exit 0
+fi
+
 if [ -z "$task_name" ]; then
-	echo "usage: pj-sandbox-spawn <task-name>" >&2
+	echo "usage: pj-sbx-spawn <task-name> --base <name>" >&2
 	exit 1
 fi
 
+if [ -z "$base_name" ]; then
+	echo "pj-sbx-spawn: --base <name> is required -- valid names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
+	exit 1
+fi
+
+if ! base_template_path="$(sandbox_base_template_path "$templates_dir" "$base_name")"; then
+	echo "pj-sbx-spawn: unrecognized --base '$base_name' -- valid names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
+	exit 1
+fi
+
+if [ -n "$ports_arg" ]; then
+	old_ifs="$IFS"
+	IFS=','
+	for guest_port in $ports_arg; do
+		case "$guest_port" in
+			''|*[!0-9]*)
+				IFS="$old_ifs"
+				echo "pj-sbx-spawn: invalid --ports '$ports_arg' -- must be a comma-separated list of port numbers" >&2
+				exit 1
+				;;
+		esac
+	done
+	IFS="$old_ifs"
+fi
+
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-	echo "pj-sandbox-spawn: must be run from inside a git repository" >&2
+	echo "pj-sbx-spawn: must be run from inside a git repository" >&2
 	exit 1
 fi
 
@@ -90,7 +167,7 @@ repo_gitdir="$(cd "$repo_root" && cd "$(git rev-parse --git-common-dir)" && pwd)
 instance_name="$(sandbox_instance_name "$task_name")"
 
 if limactl list --json 2>/dev/null | grep -qF "\"name\":\"$instance_name\""; then
-	echo "pj-sandbox-spawn: a sandbox named '$instance_name' already exists -- pick a different task name or tear it down first" >&2
+	echo "pj-sbx-spawn: a sandbox named '$instance_name' already exists -- pick a different task name or tear it down first" >&2
 	exit 1
 fi
 
@@ -101,20 +178,20 @@ vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
 mkdir -p "$sandbox_root/worktrees" "$sandbox_root/lima-configs"
 
 worktree_action="$(sandbox_resolve_worktree_action "$repo_root" "$worktree_path" "$instance_name")" || {
-	echo "pj-sandbox-spawn: '$worktree_path' exists but isn't a registered git worktree of this repo -- pick a different task name or remove it first" >&2
+	echo "pj-sbx-spawn: '$worktree_path' exists but isn't a registered git worktree of this repo -- pick a different task name or remove it first" >&2
 	exit 1
 }
 
 case "$worktree_action" in
 	resume)
-		echo "pj-sandbox-spawn: resuming branch/worktree at '$worktree_path' (left behind by a prior teardown)..."
+		echo "pj-sbx-spawn: resuming branch/worktree at '$worktree_path' (left behind by a prior teardown)..."
 		;;
 	attach)
-		echo "pj-sandbox-spawn: branch '$instance_name' already exists -- attaching a new worktree at '$worktree_path'..."
+		echo "pj-sbx-spawn: branch '$instance_name' already exists -- attaching a new worktree at '$worktree_path'..."
 		git -C "$repo_root" worktree add "$worktree_path" "$instance_name"
 		;;
 	*)
-		echo "pj-sandbox-spawn: creating branch '$instance_name' and worktree at '$worktree_path'..."
+		echo "pj-sbx-spawn: creating branch '$instance_name' and worktree at '$worktree_path'..."
 		git -C "$repo_root" worktree add -b "$instance_name" "$worktree_path"
 		;;
 esac
@@ -131,16 +208,30 @@ fi
 
 ssh_port="$(sandbox_allocate_port)"
 
+port_mappings=""
+if [ -n "$ports_arg" ]; then
+	port_mappings="$(sandbox_allocate_ports "$ports_arg")"
+fi
+
 sandbox_render_lima_config \
 	"$DOTFILES_HOME/sandbox/lima-template.yaml" \
 	"$ssh_port" \
 	"$worktree_path" \
 	"${AWS_PROFILE:-}" \
 	"$DOTFILES_HOME" \
-	"$repo_gitdir" > "$vm_config"
+	"$repo_gitdir" \
+	"$base_template_path" \
+	"$port_mappings" > "$vm_config"
 
-echo "pj-sandbox-spawn: starting Lima VM '$instance_name' (SSH port $ssh_port)..."
+echo "pj-sbx-spawn: starting Lima VM '$instance_name' (SSH port $ssh_port)..."
 limactl start --name "$instance_name" --tty=false "$vm_config"
+
+if [ -n "$port_mappings" ]; then
+	echo "$port_mappings" | while IFS=':' read -r guest_port host_port; do
+		[ -z "$guest_port" ] && continue
+		echo "pj-sbx-spawn: forwarding localhost:$host_port -> $guest_port"
+	done
+fi
 
 ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/pj-sandbox-config}"
 ssh_config_file="${SANDBOX_SSH_CONFIG_FILE:-$HOME/.ssh/config}"
@@ -161,9 +252,9 @@ sandbox_ssh_ensure_include "$ssh_include_file" "$ssh_config_file"
 # output, shell history, or the per-task Lima config on disk.
 gh_token=""
 if command -v gh >/dev/null 2>&1 && gh_token="$(gh auth token 2>/dev/null)" && [ -n "$gh_token" ]; then
-	echo "pj-sandbox-spawn: forwarding the host's active 'gh' auth token into the VM for gh/Copilot CLI..."
+	echo "pj-sbx-spawn: forwarding the host's active 'gh' auth token into the VM for gh/Copilot CLI..."
 else
-	echo "pj-sandbox-spawn: host 'gh' isn't authenticated -- gh/Copilot CLI will need a fresh login inside the VM"
+	echo "pj-sbx-spawn: host 'gh' isn't authenticated -- gh/Copilot CLI will need a fresh login inside the VM"
 fi
 
 # Same idea for Claude Code's long-lived sandbox token (see the header
@@ -174,15 +265,15 @@ fi
 claude_token=""
 if [ -f "$HOME/.claude/sandbox-oauth-token" ]; then
 	claude_token="$(cat "$HOME/.claude/sandbox-oauth-token")"
-	echo "pj-sandbox-spawn: forwarding the host's Claude Code sandbox token into the VM..."
+	echo "pj-sbx-spawn: forwarding the host's Claude Code sandbox token into the VM..."
 else
-	echo "pj-sandbox-spawn: no ~/.claude/sandbox-oauth-token on the host -- Claude Code will need an interactive login inside the VM"
+	echo "pj-sbx-spawn: no ~/.claude/sandbox-oauth-token on the host -- Claude Code will need an interactive login inside the VM"
 fi
 
 # Bootstrap this dotfiles repo inside the VM (mounted read-only above) so
 # the guest gets the same zsh aliases/functions as the host, wire up
 # forwarded auth (the gh token captured above, plus Claude Code's
-# long-lived token if the user has opted in -- see the pj-sandbox-spawn
+# long-lived token if the user has opted in -- see the pj-sbx-spawn
 # header/README for the one-time `claude setup-token` step), and make zsh
 # the shell every session actually lands in.
 #
@@ -193,10 +284,9 @@ fi
 # multiplexed over the single SSH ControlMaster connection Lima opens
 # during boot, long before this script ever runs -- and whatever PAM/
 # passwd read at that original connection time is what every later session
-# over it keeps getting, for the VMs entire life (confirmed directly: same
-# root cause as the docker-group timing issue worked around with sudo in
-# the devcontainer block below). So instead of fighting that stale
-# connection, this writes the exports and a bash-to-zsh handoff directly
+# over it keeps getting, for the VMs entire life (confirmed directly). So
+# instead of fighting that stale connection, this writes the exports and
+# a bash-to-zsh handoff directly
 # into the guest's own bash login file, which bash re-reads fresh on every
 # single login regardless of what the original connection cached.
 #
@@ -219,7 +309,7 @@ fi
 # directly: a shell reading a piped script does not necessarily do so
 # strictly line-by-line, so an embedded `read` can end up consuming bytes
 # the interpreter itself still needed).
-echo "pj-sandbox-spawn: bootstrapping dotfiles and forwarded auth inside the VM..."
+echo "pj-sbx-spawn: bootstrapping dotfiles and forwarded auth inside the VM..."
 ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 	set -eu
 	gh_token_in="${1:-}"
@@ -255,8 +345,8 @@ ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BO
 	[ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
 	[ -f "$HOME/.bash_profile" ] && bash_login_file="$HOME/.bash_profile"
 
-	if ! grep -qF "pj-sandbox-spawn: forwarded host auth" "$bash_login_file" 2>/dev/null; then
-		printf '\n# pj-sandbox-spawn: forwarded host auth -- exported here rather than via\n# /etc/environment, since that never reaches a real session on this VM.\n' >> "$bash_login_file"
+	if ! grep -qF "pj-sbx-spawn: forwarded host auth" "$bash_login_file" 2>/dev/null; then
+		printf '\n# pj-sbx-spawn: forwarded host auth -- exported here rather than via\n# /etc/environment, since that never reaches a real session on this VM.\n' >> "$bash_login_file"
 		if [ -n "$gh_token_in" ]; then
 			printf 'export GH_TOKEN="%s"\nexport GITHUB_TOKEN="%s"\n' "$gh_token_in" "$gh_token_in" >> "$bash_login_file"
 		fi
@@ -302,39 +392,14 @@ json.dump(d, open(path, "w"), indent=2)
 	# top-level interactive SSH login -- every child process of that login
 	# (including `claude` and everything its Bash tool spawns) inherits the
 	# marker and skips the exec, running as plain bash instead.
-	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sandbox-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
-		printf '\n# pj-sandbox-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session. Guarded by an\n# inherited marker, not just $ZSH_VERSION, so tools that source this same\n# profile to init a child shell (e.g. Claude Code'"'"'s own Bash tool) don'"'"'t\n# get hijacked into a terminal-less interactive zsh and hang.\nif [ -z "$ZSH_VERSION" ] && [ -z "$PJSANDBOX_ZSH_HANDED_OFF" ] && command -v zsh >/dev/null 2>&1; then\n\texport PJSANDBOX_ZSH_HANDED_OFF=1\n\texec zsh -l\nfi\n' >> "$bash_login_file"
+	if command -v zsh >/dev/null 2>&1 && ! grep -qF "pj-sbx-spawn: hand off to zsh" "$bash_login_file" 2>/dev/null; then
+		printf '\n# pj-sbx-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session. Guarded by an\n# inherited marker, not just $ZSH_VERSION, so tools that source this same\n# profile to init a child shell (e.g. Claude Code'"'"'s own Bash tool) don'"'"'t\n# get hijacked into a terminal-less interactive zsh and hang.\nif [ -z "$ZSH_VERSION" ] && [ -z "$PJSANDBOX_ZSH_HANDED_OFF" ] && command -v zsh >/dev/null 2>&1; then\n\texport PJSANDBOX_ZSH_HANDED_OFF=1\n\texec zsh -l\nfi\n' >> "$bash_login_file"
 	fi
 	PJSANDBOX_GUEST_BOOTSTRAP
 unset gh_token claude_token
 
-if devcontainer_config="$(sandbox_devcontainer_config_path "$worktree_path")"; then
-	echo "pj-sandbox-spawn: devcontainer.json found ($devcontainer_config) -- installing the devcontainer CLI and running 'devcontainer up' inside the VM..."
-	limactl shell "$instance_name" -- sh -c '
-		set -eux
-		if ! command -v node >/dev/null 2>&1; then
-			sudo apt-get update
-			sudo apt-get install -y nodejs npm
-		fi
-		if ! command -v devcontainer >/dev/null 2>&1; then
-			sudo npm install -g @devcontainers/cli
-		fi
-		# sudo: the docker-group membership this VM just granted its user
-		# (lima-template.yaml) only takes effect for a fresh login session --
-		# this one is running over the SSH ControlMaster connection Lima
-		# opened during boot, before that group change landed (confirmed
-		# against a real spawn: `docker ps` failed with a permission error
-		# here despite `getent group docker` already listing the user).
-		# Sudo sidesteps the timing race entirely since root already owns
-		# the docker socket.
-		sudo devcontainer up --workspace-folder /workspace
-	'
-else
-	echo "pj-sandbox-spawn: no devcontainer.json found -- leaving VM bare"
-fi
-
-echo "pj-sandbox-spawn: sandbox '$instance_name' is up (worktree: $worktree_path, ssh port: $ssh_port) -- run 'ssh $instance_name' or 'pj-sbx-ssh $task_name' to connect"
+echo "pj-sbx-spawn: sandbox '$instance_name' is up (worktree: $worktree_path, ssh port: $ssh_port) -- run 'ssh $instance_name' or 'pj-sbx-ssh $task_name' to connect"
 if [ -n "$workspace_path" ]; then
-	echo "pj-sandbox-spawn: VS Code workspace file written to $workspace_path"
+	echo "pj-sbx-spawn: VS Code workspace file written to $workspace_path"
 fi
-echo "pj-sandbox-spawn: to read Jira/Confluence tickets from inside the VM, run 'ssh -t $instance_name claude mcp login atlassian --no-browser', open the printed URL here, and paste the redirect URL back at the prompt (one-time per VM spawn -- this auth can't be forwarded like the gh/Claude tokens)"
+echo "pj-sbx-spawn: to read Jira/Confluence tickets from inside the VM, run 'ssh -t $instance_name claude mcp login atlassian --no-browser', open the printed URL here, and paste the redirect URL back at the prompt (one-time per VM spawn -- this auth can't be forwarded like the gh/Claude tokens)"

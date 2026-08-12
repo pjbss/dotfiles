@@ -1,6 +1,6 @@
 # workspace.sh
 #
-# VS Code workspace file detection/copy-through for `pj-sandbox-spawn`
+# VS Code workspace file detection/copy-through for `pj-sbx-spawn`
 # (issue 001): if the source repo has a `<repo_name>.code-workspace` file
 # at its root -- the conventional name VS Code's own "Save Workspace As"
 # defaults to -- copy it into the newly spawned worktree so opening VS
@@ -11,8 +11,7 @@
 #
 # Prints REPO_ROOT/<repo_name>.code-workspace (repo_name being
 # `basename REPO_ROOT`) and returns 0 if that file exists. Prints nothing
-# and returns 1 if it doesn't -- so callers can branch on presence the
-# same way sandbox_devcontainer_config_path is used in pj-sandbox-spawn.
+# and returns 1 if it doesn't -- so callers can branch on presence.
 sandbox_workspace_source_path() {
 	repo_root="$1"
 	repo_name="$(basename "$repo_root")"

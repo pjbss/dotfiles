@@ -1,22 +1,46 @@
 # list.sh
 #
-# Sandbox discovery/listing logic for `pj-sandbox-list`: enumerates
+# Sandbox discovery/listing logic for `pj-sbx-list`: enumerates
 # sandboxes known to this tooling (rendered per-task Lima configs under a
-# sandbox root, written by pj-sandbox-spawn/issue 003) and
+# sandbox root, written by pj-sbx-spawn/issue 003) and
 # correlates them with `limactl list --json` for live status. Meant to be
 # sourced, not executed directly.
+
+# sandbox_port_mapping CONFIG_FILE
+#
+# Reads a rendered per-task Lima config (sandbox_render_lima_config's
+# output, written by pj-sbx-spawn -- issue 005) and prints its `--ports`
+# host<->guest mapping as a single comma-separated "hostPort:guestPort,..."
+# string (e.g. "60100:8000,60101:5432"), in the same order the
+# `portForwards:` block lists them. Prints nothing (empty string) if
+# CONFIG_FILE has no `portForwards:` block at all -- the sandbox was
+# spawned without `--ports`, not an error. Parses the file directly with
+# awk rather than via `limactl list --json`: the mapping is baked into the
+# config at spawn time and doesn't change while the VM runs, and reading
+# it straight from the artifact this tooling already discovers sandboxes
+# from works identically whether the instance is running or stopped.
+sandbox_port_mapping() {
+	config_file="$1"
+
+	awk '
+		/guestPort:/ { gsub(/[^0-9]/, "", $0); g = $0 }
+		/hostPort:/ { gsub(/[^0-9]/, "", $0); h = $0; printf "%s%s:%s", (n++ ? "," : ""), h, g }
+	' "$config_file"
+}
 
 # sandbox_list_entries ROOT
 #
 # For every "<root>/<repo>/lima-configs/<instance>.yaml" found, prints one
-# tab-separated line: "<instance>\t<worktree-path>\t<status>", where
-# worktree-path is "<root>/<repo>/worktrees/<instance>" (the layout
-# pj-sandbox-spawn writes, issue 003) and status is whatever
+# tab-separated line: "<instance>\t<worktree-path>\t<status>\t<port-mapping>",
+# where worktree-path is "<root>/<repo>/worktrees/<instance>" (the layout
+# pj-sbx-spawn writes, issue 003), status is whatever
 # `limactl list --json` reports for that instance name, or "stopped" if
 # limactl has no record of it (e.g. the VM was torn down but the render
 # artifact and worktree still exist -- issue 007 decides whether that
 # artifact is removed on teardown; while it isn't, entries linger here as
-# "stopped" rather than disappearing outright). Prints nothing if no
+# "stopped" rather than disappearing outright), and port-mapping is
+# sandbox_port_mapping's output for that instance's rendered config (empty
+# for a sandbox spawned without `--ports`, issue 006). Prints nothing if no
 # sandboxes are known under ROOT.
 sandbox_list_entries() {
 	root="$1"
@@ -42,6 +66,8 @@ sandbox_list_entries() {
 		status="$(echo "$live_status" | awk -v n="$instance" '$1 == n { print $2 }')"
 		status="${status:-stopped}"
 
-		printf '%s\t%s\t%s\n' "$instance" "$worktree_path" "$status"
+		port_mapping="$(sandbox_port_mapping "$config")"
+
+		printf '%s\t%s\t%s\t%s\n' "$instance" "$worktree_path" "$status" "$port_mapping"
 	done
 }

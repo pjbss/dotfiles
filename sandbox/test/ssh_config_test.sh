@@ -2,7 +2,7 @@
 # ssh_config_test.sh
 #
 # Plain-shell unit tests for sandbox/lib/ssh_config.sh (VS Code Remote-SSH
-# config generation for `pj-sandbox-spawn`). No test framework
+# config generation for `pj-sbx-spawn`). No test framework
 # dependency, same minimal assert style as task_test.sh/list_test.sh.
 
 set -euo pipefail

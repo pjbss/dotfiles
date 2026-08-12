@@ -1,6 +1,6 @@
 # ssh_config.sh
 #
-# VS Code Remote-SSH config generation for `pj-sandbox-spawn`
+# VS Code Remote-SSH config generation for `pj-sbx-spawn`
 # (issue 005): renders a friendly `Host <task-name>` alias from the
 # per-instance ssh.config Lima itself already writes at `limactl start`
 # time, and maintains a dotfiles-managed include file so `~/.ssh/config`

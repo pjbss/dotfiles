@@ -1,0 +1,41 @@
+#!/bin/sh
+# pj-sbx-list
+#
+# Lists sandboxes known to this tooling: task name, worktree path,
+# running/stopped status, and forwarded host<->guest port mapping (empty
+# for a sandbox spawned without `--ports`, issue 006) -- correlating the
+# per-task Lima configs pj-sbx-spawn writes (issue 003) with
+# `limactl list --json`.
+#
+# Usage: pj-sbx-list [--help|-h]
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+. "$DOTFILES_HOME/sandbox/lib/list.sh"
+
+sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}"
+
+entries="$(sandbox_list_entries "$sandbox_root")"
+
+if [ -z "$entries" ]; then
+	echo "no sandboxes found"
+	exit 0
+fi
+
+printf 'TASK\tWORKTREE\tSTATUS\tPORTS\n%s\n' "$entries" | awk -F'\t' '{ printf "%-24s %-50s %-10s %s\n", $1, $2, $3, $4 }'

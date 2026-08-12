@@ -83,7 +83,7 @@ ensure_installed fzf fzf
 for sub_dir in "$DOTFILES_HOME"/*/; do
 	module_name="$(basename "$sub_dir")"
 
-	# pj-sandbox-spawn runs this same install.sh inside a spawned sandbox VM
+	# pj-sbx-spawn runs this same install.sh inside a spawned sandbox VM
 	# (with DOTFILES_SANDBOX_GUEST=1) to give the guest the same aliases as
 	# the host. Skip the sandbox module itself in that case -- there's no
 	# sense installing Lima inside a Lima VM.
@@ -99,5 +99,5 @@ done
 # Runs in a sandbox VM guest too (DOTFILES_SANDBOX_GUEST=1): ~/.claude and
 # ~/.copilot are ordinary writable directories there, not mounts, so this
 # renders the guest's own copy of skills/subagents straight from this repo
-# (mounted read-only at ~/dotfiles by pj-sandbox-spawn), same as on the host.
+# (mounted read-only at ~/dotfiles by pj-sbx-spawn), same as on the host.
 "$DOTFILES_HOME/bin/dotfiles-sync-agents"

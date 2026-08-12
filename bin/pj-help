@@ -1,0 +1,53 @@
+#!/bin/sh
+# pj-help
+#
+# Indexes every `pj-`-prefixed sandbox command with a one-line description
+# each, so there's a single place to discover what's available without
+# reading source. Descriptions are sourced straight from each command's
+# own header/doc comment (sandbox/lib/help.sh -- the same parsing `--help`
+# uses, issue 007), not a separately hand-maintained manifest, so a new
+# `pj-`-prefixed bin/ command with its own header comment shows up here
+# automatically. Deliberately scoped to just the `pj-` namespace, not a
+# repo-wide alias index (`l`, `la`, `reload!`, etc. never appear).
+#
+# `pj-sbx-ssh` is the one exception with no `bin/pj-sbx-*` counterpart --
+# it's a zsh function in zsh/modules/sandbox.zsh, so its description is
+# read from the doc comment directly above that function definition
+# instead of a script header.
+#
+# Usage: pj-help [--help|-h]
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+summaries=""
+for script in "$DOTFILES_HOME"/bin/pj-*; do
+	[ -f "$script" ] || continue
+
+	header="$(sandbox_script_help "$script")"
+	summary="$(sandbox_help_summary "$header")"
+	[ -n "$summary" ] && summaries="${summaries}${summary}
+"
+done
+
+ssh_header="$(sandbox_comment_block_above "$DOTFILES_HOME/zsh/modules/sandbox.zsh" "pj-sbx-ssh() {")"
+ssh_summary="$(sandbox_help_summary "$ssh_header")"
+[ -n "$ssh_summary" ] && summaries="${summaries}${ssh_summary}
+"
+
+printf '%s' "$summaries" | sort | awk -F'\t' '{ printf "%-16s %s\n", $1, $2 }'

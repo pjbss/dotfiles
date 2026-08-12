@@ -2,9 +2,9 @@
 # workspace_test.sh
 #
 # Plain-shell unit tests for sandbox/lib/workspace.sh (VS Code workspace
-# file detection/copy-through for `pj-sandbox-spawn`, issue 001). No test
+# file detection/copy-through for `pj-sbx-spawn`, issue 001). No test
 # framework dependency, same minimal assert style as task_test.sh/
-# devcontainer_test.sh.
+# list_test.sh.
 
 set -euo pipefail
 

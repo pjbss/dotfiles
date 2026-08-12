@@ -1,14 +1,14 @@
 #!/bin/sh
-# pj-sandbox-teardown
+# pj-sbx-teardown
 #
 # Tears down a sandbox's Lima VM: stops and deletes the VM (issue 003) and
 # removes its VS Code Remote-SSH entry (issue 005). Deliberately leaves the
 # git worktree and branch untouched -- only the render artifact under
 # lima-configs/ is removed, so the task disappears from
-# `pj-sandbox-list` (issue 006) while the worktree/branch persist for
-# a future `pj-sandbox-spawn` against the same task name.
+# `pj-sbx-list` (issue 006) while the worktree/branch persist for
+# a future `pj-sbx-spawn` against the same task name.
 #
-# Usage: pj-sandbox-teardown <task-name>
+# Usage: pj-sbx-teardown <task-name> [--help|-h]
 
 set -eu
 
@@ -17,17 +17,28 @@ while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
 . "$DOTFILES_HOME/sandbox/lib/task.sh"
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
 
 task_name="${1:-}"
 if [ -z "$task_name" ]; then
-	echo "usage: pj-sandbox-teardown <task-name>" >&2
+	echo "usage: pj-sbx-teardown <task-name>" >&2
 	exit 1
 fi
 
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-	echo "pj-sandbox-teardown: must be run from inside a git repository" >&2
+	echo "pj-sbx-teardown: must be run from inside a git repository" >&2
 	exit 1
 fi
 
@@ -40,11 +51,11 @@ sandbox_root="${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}/$repo_name"
 vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
 
 if [ ! -e "$vm_config" ]; then
-	echo "pj-sandbox-teardown: no sandbox named '$instance_name' found" >&2
+	echo "pj-sbx-teardown: no sandbox named '$instance_name' found" >&2
 	exit 1
 fi
 
-echo "pj-sandbox-teardown: stopping and deleting Lima VM '$instance_name'..."
+echo "pj-sbx-teardown: stopping and deleting Lima VM '$instance_name'..."
 limactl stop "$instance_name"
 limactl delete "$instance_name"
 
@@ -53,4 +64,4 @@ sandbox_ssh_remove_entry "$ssh_include_file" "$instance_name"
 
 rm -f "$vm_config"
 
-echo "pj-sandbox-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"
+echo "pj-sbx-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # worktree_test.sh
 #
-# Plain-shell unit tests for sandbox/lib/worktree.sh (pj-sandbox-spawn's
+# Plain-shell unit tests for sandbox/lib/worktree.sh (pj-sbx-spawn's
 # create-vs-resume decision for a task's worktree path, added during issue
 # 010's end-to-end validation pass). Uses a real, throwaway git repo under a
 # tmpdir -- `git worktree list` needs a real repo, but this never touches the

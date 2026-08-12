@@ -119,19 +119,16 @@ credentials.
 
 ### Commands
 
-- `pj-sandbox-spawn <task-name>` -- creates a new branch + worktree on the
+- `pj-sbx-spawn <task-name>` -- creates a new branch + worktree on the
   host, boots a Lima VM with that worktree mounted read-write, and wires up
-  a VS Code Remote-SSH-ready `ssh <task-name>` entry. If the worktree has a
-  `devcontainer.json`, it's built and run inside the VM via the devcontainer
-  CLI; otherwise the VM is left bare aside from Docker, Node, and the Claude
-  Code/Copilot CLIs (installed unconditionally either way).
-- `pj-sandbox-list` -- lists every sandbox this tooling knows about (task
+  a VS Code Remote-SSH-ready `ssh <task-name>` entry. The VM comes up bare
+  aside from Docker, Node, and the Claude Code/Copilot CLIs (installed
+  unconditionally).
+- `pj-sbx-list` -- lists every sandbox this tooling knows about (task
   name, worktree path, running/stopped).
-- `pj-sandbox-teardown <task-name>` -- stops and deletes the VM. The
+- `pj-sbx-teardown <task-name>` -- stops and deletes the VM. The
   worktree and branch are left untouched, so the same task name can be
-  resumed later with another `pj-sandbox-spawn`.
-- `pj-sbx-spawn` / `pj-sbx-list` / `pj-sbx-teardown` -- short aliases for
-  the three commands above (`zsh/modules/sandbox.zsh`).
+  resumed later with another `pj-sbx-spawn`.
 - `pj-sbx-ssh <task-name>` -- connects to a running sandbox from a
   terminal (resolves the same task-name slug spawn/teardown use, then hands
   off to the system `ssh`).
@@ -152,7 +149,7 @@ credentials.
 
 `gh`, Claude Code, and Copilot CLI normally store their real credentials in
 the macOS Keychain, which a Linux VM can't reach -- mounting their config
-directories alone isn't enough. `pj-sandbox-spawn` works around this:
+directories alone isn't enough. `pj-sbx-spawn` works around this:
 
 - **gh / Copilot CLI**: forwards the host's currently-active `gh auth
   token` into the VM as `GH_TOKEN`/`GITHUB_TOKEN` at spawn time. Requires
@@ -173,5 +170,5 @@ directories alone isn't enough. `pj-sandbox-spawn` works around this:
 - macOS (Lima's use here targets this user's Darwin machine).
 - `limactl` (installed automatically by `sandbox/install.sh`, via
   Homebrew).
-- VS Code with the Remote-SSH extension (and Dev Containers, for projects
-  with a `devcontainer.json`) to connect to a spawned sandbox from an IDE.
+- VS Code with the Remote-SSH extension to connect to a spawned sandbox
+  from an IDE.

@@ -82,6 +82,93 @@ assert_eq "$((SANDBOX_SSH_PORT_MIN + 2))" "$with_sandboxes_port" "sandbox_alloca
 
 unset -f limactl
 
+# --- sandbox_allocate_ports (issue 005) ---
+
+limactl() {
+	echo ""
+}
+
+no_sandboxes_ports="$(sandbox_allocate_ports "8000,5432")"
+assert_eq "8000:$SANDBOX_FORWARD_PORT_MIN
+5432:$((SANDBOX_FORWARD_PORT_MIN + 1))" "$no_sandboxes_ports" \
+	"sandbox_allocate_ports allocates one distinct host port per guest port, from the forward range, when no sandboxes are running"
+
+if echo "$no_sandboxes_ports" | grep -qx "$SANDBOX_SSH_PORT_MIN:.*\|.*:$SANDBOX_SSH_PORT_MIN"; then
+	echo "FAIL: sandbox_allocate_ports never allocates from the SSH port range"
+	failures=$((failures + 1))
+else
+	echo "PASS: sandbox_allocate_ports never allocates from the SSH port range"
+fi
+
+# Another running sandbox's SSH port *and* an existing port forward
+# (config.portForwards[].hostPort -- confirmed against Lima's real
+# limatype.Instance/PortForward JSON field names) must both be skipped.
+limactl() {
+	cat <<-EOF
+	{"name":"task-a","status":"Running","sshLocalPort":$SANDBOX_SSH_PORT_MIN,"config":{"portForwards":[{"guestPort":8000,"hostPort":$SANDBOX_FORWARD_PORT_MIN}]}}
+	EOF
+}
+
+with_forward_claimed="$(sandbox_allocate_ports "8000")"
+assert_eq "8000:$((SANDBOX_FORWARD_PORT_MIN + 1))" "$with_forward_claimed" \
+	"sandbox_allocate_ports skips a host port already claimed by another running sandbox's port forward"
+
+# Two guest ports in the *same* spawn must never collide with each other
+# either, even before either is visible via `limactl list --json`.
+limactl() {
+	echo ""
+}
+
+same_call_ports="$(sandbox_allocate_ports "8000,8000")"
+host_port_1="$(echo "$same_call_ports" | sed -n '1p' | cut -d: -f2)"
+host_port_2="$(echo "$same_call_ports" | sed -n '2p' | cut -d: -f2)"
+if [ -n "$host_port_1" ] && [ -n "$host_port_2" ] && [ "$host_port_1" != "$host_port_2" ]; then
+	echo "PASS: sandbox_allocate_ports allocates distinct host ports for the same guest port requested twice in one call"
+else
+	echo "FAIL: sandbox_allocate_ports allocates distinct host ports for the same guest port requested twice in one call (got '$same_call_ports')"
+	failures=$((failures + 1))
+fi
+
+# Simulates two sandboxes spawned "at the same time" both requesting the
+# same guest port (issue 005 acceptance criterion 4): once the first
+# spawn's VM is up (so its forward shows up in `limactl list --json`), a
+# second, independent sandbox_allocate_ports call for the same guest port
+# must land on a different host port -- no collision.
+first_spawn_mapping="$(sandbox_allocate_ports "8000")"
+first_spawn_host_port="$(echo "$first_spawn_mapping" | cut -d: -f2)"
+
+limactl() {
+	cat <<-EOF
+	{"name":"task-a","status":"Running","config":{"portForwards":[{"guestPort":8000,"hostPort":$first_spawn_host_port}]}}
+	EOF
+}
+
+second_spawn_mapping="$(sandbox_allocate_ports "8000")"
+second_spawn_host_port="$(echo "$second_spawn_mapping" | cut -d: -f2)"
+
+if [ "$first_spawn_host_port" != "$second_spawn_host_port" ]; then
+	echo "PASS: two sandboxes requesting the same guest port get different host ports once the first is running"
+else
+	echo "FAIL: two sandboxes requesting the same guest port get different host ports once the first is running (both got '$first_spawn_host_port')"
+	failures=$((failures + 1))
+fi
+
+unset -f limactl
+
+# --- sandbox_port_forwards_yaml (issue 005) ---
+
+empty_forwards_yaml="$(sandbox_port_forwards_yaml "")"
+assert_eq "" "$empty_forwards_yaml" "sandbox_port_forwards_yaml prints nothing for empty input"
+
+forwards_yaml="$(sandbox_port_forwards_yaml "8000:60100
+5432:60101")"
+assert_eq "portForwards:
+- guestPort: 8000
+  hostPort: 60100
+- guestPort: 5432
+  hostPort: 60101" "$forwards_yaml" \
+	"sandbox_port_forwards_yaml renders a portForwards YAML block, one list item per mapping"
+
 # --- sandbox_render_lima_config ---
 
 fixture_template="$(mktemp)"
@@ -150,6 +237,111 @@ case "$rendered_with_gitdir" in
 esac
 
 rm -f "$fixture_template" "$fixture_template_dotfiles" "$fixture_template_gitdir"
+
+# --- sandbox_render_lima_config: --base template provisioning (issue 003) ---
+
+fixture_template_base="$(mktemp)"
+cat > "$fixture_template_base" <<-'EOF'
+	provision:
+	- mode: system
+	  script: |
+	    echo "base provisioning"
+	__SANDBOX_BASE_PROVISION__
+	EOF
+
+fixture_base_template="$(mktemp)"
+cat > "$fixture_base_template" <<-'EOF'
+	- mode: system
+	  script: |
+	    echo "FIXTURE_BASE_TEMPLATE_CONTENT"
+	EOF
+
+rendered_with_base="$(sandbox_render_lima_config "$fixture_template_base" 60099 /tmp/some-worktree '' '' '' "$fixture_base_template")"
+
+case "$rendered_with_base" in
+*FIXTURE_BASE_TEMPLATE_CONTENT*) echo "PASS: sandbox_render_lima_config splices the selected --base template's provisioning into the output" ;;
+*) echo "FAIL: sandbox_render_lima_config splices the selected --base template's provisioning into the output"; failures=$((failures + 1)) ;;
+esac
+
+case "$rendered_with_base" in
+*__SANDBOX_BASE_PROVISION__*) echo "FAIL: sandbox_render_lima_config removes the __SANDBOX_BASE_PROVISION__ placeholder"; failures=$((failures + 1)) ;;
+*) echo "PASS: sandbox_render_lima_config removes the __SANDBOX_BASE_PROVISION__ placeholder" ;;
+esac
+
+fixture_base_template_empty="$(mktemp)"
+
+rendered_with_none="$(sandbox_render_lima_config "$fixture_template_base" 60099 /tmp/some-worktree '' '' '' "$fixture_base_template_empty")"
+
+case "$rendered_with_none" in
+*__SANDBOX_BASE_PROVISION__*) echo "FAIL: sandbox_render_lima_config's 'none' template (empty file) still removes the placeholder"; failures=$((failures + 1)) ;;
+*) echo "PASS: sandbox_render_lima_config's 'none' template (empty file) still removes the placeholder" ;;
+esac
+
+assert_eq "provision:
+- mode: system
+  script: |
+    echo \"base provisioning\"" "$rendered_with_none" \
+	"sandbox_render_lima_config's 'none' template yields the same output as no base provisioning at all"
+
+rm -f "$fixture_template_base" "$fixture_base_template" "$fixture_base_template_empty"
+
+# --- sandbox_render_lima_config: --ports port-forward splicing (issue 005) ---
+
+fixture_template_ports="$(mktemp)"
+cat > "$fixture_template_ports" <<-'EOF'
+	ssh:
+	  localPort: __SANDBOX_SSH_PORT__
+
+	__SANDBOX_PORT_FORWARDS__
+
+	mounts: []
+	EOF
+
+rendered_with_ports="$(sandbox_render_lima_config "$fixture_template_ports" 60099 /tmp/some-worktree '' '' '' '' "8000:60100
+5432:60101")"
+
+case "$rendered_with_ports" in
+*'portForwards:'*'guestPort: 8000'*'hostPort: 60100'*'guestPort: 5432'*'hostPort: 60101'*)
+	echo "PASS: sandbox_render_lima_config splices the --ports mapping into a portForwards YAML block" ;;
+*)
+	echo "FAIL: sandbox_render_lima_config splices the --ports mapping into a portForwards YAML block (got: $rendered_with_ports)"
+	failures=$((failures + 1)) ;;
+esac
+
+case "$rendered_with_ports" in
+*__SANDBOX_PORT_FORWARDS__*) echo "FAIL: sandbox_render_lima_config removes the __SANDBOX_PORT_FORWARDS__ placeholder"; failures=$((failures + 1)) ;;
+*) echo "PASS: sandbox_render_lima_config removes the __SANDBOX_PORT_FORWARDS__ placeholder" ;;
+esac
+
+rendered_without_ports="$(sandbox_render_lima_config "$fixture_template_ports" 60099 /tmp/some-worktree '' '' '' '' '')"
+
+case "$rendered_without_ports" in
+*portForwards*) echo "FAIL: sandbox_render_lima_config renders no portForwards key when --ports is omitted"; failures=$((failures + 1)) ;;
+*) echo "PASS: sandbox_render_lima_config renders no portForwards key when --ports is omitted" ;;
+esac
+
+assert_eq "ssh:
+  localPort: 60099
+
+
+mounts: []" "$rendered_without_ports" \
+	"sandbox_render_lima_config with no --ports mapping yields the same output as before issue 005"
+
+rm -f "$fixture_template_ports"
+
+if grep -qF '__SANDBOX_PORT_FORWARDS__' "$SANDBOX_DIR/lima-template.yaml"; then
+	echo "PASS: lima-template.yaml contains the __SANDBOX_PORT_FORWARDS__ placeholder (issue 005)"
+else
+	echo "FAIL: lima-template.yaml contains the __SANDBOX_PORT_FORWARDS__ placeholder (issue 005)"
+	failures=$((failures + 1))
+fi
+
+if grep -qF '__SANDBOX_BASE_PROVISION__' "$SANDBOX_DIR/lima-template.yaml"; then
+	echo "PASS: lima-template.yaml contains the __SANDBOX_BASE_PROVISION__ placeholder (issue 003)"
+else
+	echo "FAIL: lima-template.yaml contains the __SANDBOX_BASE_PROVISION__ placeholder (issue 003)"
+	failures=$((failures + 1))
+fi
 
 # --- credential mounts in the real base template (issue 004) ---
 

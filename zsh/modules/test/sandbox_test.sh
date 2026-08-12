@@ -2,11 +2,9 @@
 # sandbox_test.sh
 #
 # Plain-shell tests for zsh/modules/sandbox.zsh, matching the assert style
-# already used in sandbox/test/*.sh. Most of sandbox.zsh is one-line alias
-# delegation (spawn/list/teardown -> bin/pj-sandbox-*); pj-sbx-ssh is the
-# one alias with real logic (resolving a free-text task name to the same
-# slug spawn/teardown use before invoking `ssh`), so that's what's actually
-# worth unit-testing here.
+# already used in sandbox/test/*.sh. sandbox.zsh defines exactly one
+# function, pj-sbx-ssh (resolving a free-text task name to the same slug
+# spawn/teardown use before invoking `ssh`), so that's what's tested here.
 
 set -euo pipefail
 
@@ -31,17 +29,6 @@ assert_eq() {
 		echo "PASS: $message"
 	fi
 }
-
-# --- alias delegation ---
-
-assert_eq "alias pj-sbx-spawn='pj-sandbox-spawn'" "$(alias pj-sbx-spawn)" \
-	"pj-sbx-spawn delegates to pj-sandbox-spawn"
-
-assert_eq "alias pj-sbx-list='pj-sandbox-list'" "$(alias pj-sbx-list)" \
-	"pj-sbx-list delegates to pj-sandbox-list"
-
-assert_eq "alias pj-sbx-teardown='pj-sandbox-teardown'" "$(alias pj-sbx-teardown)" \
-	"pj-sbx-teardown delegates to pj-sandbox-teardown"
 
 # --- pj-sbx-ssh ---
 

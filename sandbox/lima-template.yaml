@@ -4,10 +4,9 @@
 # with the task's worktree mounted read-write, plus read-only host
 # credential mounts (issue 004: GitHub CLI auth, AWS config/SSO cache --
 # no git credentials or SSH keys, by PRD design), plus Docker and the
-# Claude Code/GitHub CLI/GitHub Copilot CLIs provisioned on every VM
-# regardless of whether the project has a devcontainer.json (issue 008's
-# "Docker available in every spawned VM" acceptance criterion, extended to
-# cover the agent CLIs).
+# Claude Code/GitHub CLI/GitHub Copilot CLIs provisioned unconditionally
+# on every VM (issue 008's "Docker available in every spawned VM"
+# acceptance criterion, extended to cover the agent CLIs).
 #
 # ~/.claude and ~/.copilot are deliberately NOT mounted from the host,
 # unlike ~/.config/gh and ~/.aws: almost everything under those two
@@ -17,18 +16,15 @@
 # runs. Both are left as normal, VM-local, writable directories instead.
 # What those mounts were actually carrying -- the Claude Code long-lived
 # auth token, and the dotfiles-managed skills/subagents -- is forwarded a
-# different way: pj-sandbox-spawn exports CLAUDE_CODE_OAUTH_TOKEN (read
+# different way: pj-sbx-spawn exports CLAUDE_CODE_OAUTH_TOKEN (read
 # from the host's ~/.claude/sandbox-oauth-token, forwarded the same way as
 # the gh token below), and the guest bootstrap runs this repo's own
 # dotfiles-sync-agents against the read-only ~/dotfiles mount below, same
 # as it would on the host.
 #
-# This dotfiles repo itself is also mounted read-only, so pj-sandbox-spawn
+# This dotfiles repo itself is also mounted read-only, so pj-sbx-spawn
 # can bootstrap the same zsh aliases/functions inside the VM as on the
 # host, without giving the guest write access back to the host checkout.
-# Devcontainer detection, installing the devcontainer CLI, and running
-# `devcontainer up` when a devcontainer.json is actually found is
-# pj-sandbox-spawn's job, not this template's.
 #
 # The spawning repo's real git directory (__SANDBOX_REPO_GITDIR__) is also
 # mounted, read-write, at the identical absolute host path -- a linked
@@ -41,11 +37,18 @@
 # that actually run inside the worktree (commit, checkout, merge) write
 # into this shared object/ref store, not just into /workspace itself.
 #
-# pj-sandbox-spawn renders this file per task via
+# pj-sbx-spawn renders this file per task via
 # sandbox_render_lima_config (sandbox/lib/task.sh), substituting
 # __SANDBOX_SSH_PORT__, __SANDBOX_WORKTREE_PATH__,
 # __SANDBOX_DOTFILES_PATH__, and __SANDBOX_REPO_GITDIR__, and appending an
 # AWS_PROFILE passthrough stanza, then runs `limactl start` on the result.
+#
+# __SANDBOX_PORT_FORWARDS__ (issue 005) is spliced the same way as
+# __SANDBOX_BASE_PROVISION__ below: a whole `portForwards:` YAML block for
+# the spawn's `--ports <comma-separated-list>` value, one dynamically-
+# allocated host port per listed guest port (sandbox_allocate_ports), or
+# nothing at all when `--ports` is omitted -- identical to today's SSH-only
+# forwarding.
 
 minimumLimaVersion: 2.0.0
 
@@ -54,6 +57,8 @@ base:
 
 ssh:
   localPort: __SANDBOX_SSH_PORT__
+
+__SANDBOX_PORT_FORWARDS__
 
 mounts:
 - location: "__SANDBOX_WORKTREE_PATH__"
@@ -74,19 +79,13 @@ mounts:
 
 # Docker, Node/npm, and the Claude Code/GitHub CLI/GitHub Copilot CLIs,
 # unconditionally (issue 008: "Docker itself is available inside every
-# spawned VM regardless of whether the specific project has a
-# devcontainer" -- extended here to the three agent-facing CLIs, since
+# spawned VM" -- extended here to the three agent-facing CLIs, since
 # without them the ~/.config/gh credential mount and the forwarded
 # GH_TOKEN/CLAUDE_CODE_OAUTH_TOKEN env vars have nothing installed to use
-# them). This is the exception to "bare VM, no auto-installed tooling" for
-# projects without a devcontainer.json -- the extra devcontainer-CLI
-# install that `devcontainer up` itself needs is still done by
-# pj-sandbox-spawn only when a devcontainer.json is actually found, not
-# baked in here. Runs on every boot as root (mode: system), guarded by
-# `command -v` checks so re-boots of an already-provisioned VM are a cheap
-# no-op; installing as root here (rather than via sudo from the regular
-# user, as pj-sandbox-spawn's devcontainer-CLI install does) lands both
-# npm globals under /usr, on every user's PATH.
+# them). Runs on every boot as root (mode: system), guarded by `command -v`
+# checks so re-boots of an already-provisioned VM are a cheap no-op;
+# installing as root here (rather than via sudo from the regular user)
+# lands both npm globals under /usr, on every user's PATH.
 provision:
 - mode: system
   script: |
@@ -117,3 +116,11 @@ provision:
       apt-get update
       apt-get install -y gh
     fi
+# The spawn's `--base <name>` provisioning (issue 003), spliced in here by
+# sandbox_render_lima_config: a second `provision:` list item (its own
+# `- mode: system` / `script: |` ...) from sandbox/templates/<name>, or
+# nothing at all for `--base none`. Must sit at this exact column-0
+# position -- the same indentation a new top-level `provision:` list item
+# would have -- since sed's `r`/`d` splice (task.sh) inserts the template
+# file's raw content in place of this line without reindenting it.
+__SANDBOX_BASE_PROVISION__
