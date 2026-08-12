@@ -204,15 +204,15 @@ sandbox_render_lima_config() {
 		-e "s|__SANDBOX_REPO_GITDIR__|$repo_gitdir|" \
 		"$template" | {
 			if [ -n "$base_template" ]; then
-				sed -e "/__SANDBOX_BASE_PROVISION__/r $base_template" -e "/__SANDBOX_BASE_PROVISION__/d"
+				sed -e "/^__SANDBOX_BASE_PROVISION__\$/r $base_template" -e "/^__SANDBOX_BASE_PROVISION__\$/d"
 			else
-				sed -e "/__SANDBOX_BASE_PROVISION__/d"
+				sed -e "/^__SANDBOX_BASE_PROVISION__\$/d"
 			fi
 		} | {
 			if [ -s "$port_forwards_file" ]; then
-				sed -e "/__SANDBOX_PORT_FORWARDS__/r $port_forwards_file" -e "/__SANDBOX_PORT_FORWARDS__/d"
+				sed -e "/^__SANDBOX_PORT_FORWARDS__\$/r $port_forwards_file" -e "/^__SANDBOX_PORT_FORWARDS__\$/d"
 			else
-				sed -e "/__SANDBOX_PORT_FORWARDS__/d"
+				sed -e "/^__SANDBOX_PORT_FORWARDS__\$/d"
 			fi
 		}
 
