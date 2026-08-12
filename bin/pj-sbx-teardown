@@ -68,9 +68,23 @@ if [ ! -e "$vm_config" ]; then
 	exit 1
 fi
 
-echo "pj-sbx-teardown: stopping and deleting Lima VM '$instance_name'..."
-limactl stop "$instance_name"
-limactl delete "$instance_name"
+# `limactl list <name>` exits non-zero when Lima has no record of the
+# instance at all -- distinct from a real Stopped VM, which it reports
+# with exit 0. Guarding on this rather than unconditionally running
+# stop/delete matters: an already-gone VM (deleted out-of-band, or left
+# behind by a prior teardown that got this far and no further -- see
+# below) makes `limactl stop`/`delete` fail outright, which under this
+# script's `set -eu` aborted before ever reaching the ssh-entry cleanup or
+# `rm -f "$vm_config"` below, permanently stranding the render artifact
+# with no way to finish tearing it down (confirmed directly against a real
+# sandbox stuck in exactly this state).
+if limactl list "$instance_name" >/dev/null 2>&1; then
+	echo "pj-sbx-teardown: stopping and deleting Lima VM '$instance_name'..."
+	limactl stop "$instance_name"
+	limactl delete "$instance_name"
+else
+	echo "pj-sbx-teardown: no Lima VM named '$instance_name' found -- already gone, skipping VM teardown"
+fi
 
 ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/pj-sandbox-config}"
 sandbox_ssh_remove_entry "$ssh_include_file" "$instance_name"
