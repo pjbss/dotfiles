@@ -77,15 +77,19 @@ mounts:
   mountPoint: "__SANDBOX_REPO_GITDIR__"
   writable: true
 
-# Docker, Node/npm, and the Claude Code/GitHub CLI/GitHub Copilot CLIs,
-# unconditionally (issue 008: "Docker itself is available inside every
-# spawned VM" -- extended here to the three agent-facing CLIs, since
-# without them the ~/.config/gh credential mount and the forwarded
-# GH_TOKEN/CLAUDE_CODE_OAUTH_TOKEN env vars have nothing installed to use
-# them). Runs on every boot as root (mode: system), guarded by `command -v`
-# checks so re-boots of an already-provisioned VM are a cheap no-op;
-# installing as root here (rather than via sudo from the regular user)
-# lands both npm globals under /usr, on every user's PATH.
+# Docker, Node/npm, git-lfs, and the Claude Code/GitHub CLI/GitHub Copilot
+# CLIs, unconditionally (issue 008: "Docker itself is available inside
+# every spawned VM" -- extended here to the three agent-facing CLIs and to
+# git-lfs, since without them the ~/.config/gh credential mount and the
+# forwarded GH_TOKEN/CLAUDE_CODE_OAUTH_TOKEN env vars have nothing
+# installed to use them, and any repo checked out under /workspace with
+# LFS-tracked objects would otherwise leave those objects as unresolved
+# pointer files). Runs on every boot as root (mode: system), guarded by
+# `command -v` checks so re-boots of an already-provisioned VM are a cheap
+# no-op; installing as root here (rather than via sudo from the regular
+# user) lands both npm globals under /usr, on every user's PATH, and
+# `git lfs install --system` under /etc, for every user rather than just
+# the one running it.
 provision:
 - mode: system
   script: |
@@ -116,6 +120,12 @@ provision:
       apt-get update
       apt-get install -y gh
     fi
+
+    if ! command -v git-lfs >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y git-lfs
+    fi
+    git lfs install --system
 # The spawn's `--base <name>` provisioning (issue 003), spliced in here by
 # sandbox_render_lima_config: a second `provision:` list item (its own
 # `- mode: system` / `script: |` ...) from sandbox/templates/<name>, or
