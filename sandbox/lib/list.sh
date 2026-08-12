@@ -50,9 +50,16 @@ sandbox_list_entries() {
 	# line (confirmed against real `limactl list --json` output, matching
 	# the fixtures in task_test.sh); name/status are pulled independently
 	# so field order in the JSON doesn't matter.
+	# `head -1`: each JSON object's *first* "name"/"status" match is always
+	# the instance's own top-level field. Without it, Lima's nested
+	# `config.user.name` (the guest username, unrelated to the instance
+	# name) is a second "name":"..." match on the same line -- confirmed
+	# against a real spawned sandbox, where that extra match broke the
+	# name/status pairing below and caused a running instance to be
+	# misreported as stopped.
 	live_status="$(limactl list --json 2>/dev/null | while IFS= read -r line; do
-		name="$(echo "$line" | grep -Eo '"name":"[^"]*"' | sed -E 's/.*:"(.*)"/\1/')"
-		status="$(echo "$line" | grep -Eo '"status":"[^"]*"' | sed -E 's/.*:"(.*)"/\1/')"
+		name="$(echo "$line" | grep -Eo '"name":"[^"]*"' | head -1 | sed -E 's/.*:"(.*)"/\1/')"
+		status="$(echo "$line" | grep -Eo '"status":"[^"]*"' | head -1 | sed -E 's/.*:"(.*)"/\1/')"
 		[ -n "$name" ] && printf '%s %s\n' "$name" "$status"
 	done)"
 

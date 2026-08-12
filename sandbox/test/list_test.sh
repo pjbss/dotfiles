@@ -62,6 +62,19 @@ assert_eq "$(printf 'fix-thing\t%s/myrepo/worktrees/fix-thing\tstopped\t' "$fixt
 
 unset -f limactl
 
+# --- one sandbox, running, whose JSON also embeds an unrelated nested
+# "name" field (Lima's config.user.name -- the guest username) ---
+
+limactl() {
+	echo '{"name":"fix-thing","status":"Running","sshLocalPort":60022,"config":{"user":{"name":"psexton"}}}'
+}
+
+nested_name_output="$(sandbox_list_entries "$fixture_root")"
+assert_eq "$(printf 'fix-thing\t%s/myrepo/worktrees/fix-thing\tRunning\t' "$fixture_root")" "$nested_name_output" \
+	"sandbox_list_entries isn't fooled by a nested config.user.name field into misreporting a running instance as stopped"
+
+unset -f limactl
+
 # --- two sandboxes, one running, one already torn down/stopped ---
 
 mkdir -p "$fixture_root/myrepo/worktrees/other-task"
