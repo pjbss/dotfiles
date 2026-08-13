@@ -40,8 +40,8 @@ ssh() {
 }
 
 pj-sbx-ssh 'My Task'
-assert_eq "my-task" "$(cat "$SSH_CALL_LOG")" \
-	"pj-sbx-ssh resolves the task name to the same slug spawn/teardown use before invoking ssh"
+assert_eq '-t my-task cd /workspace && exec "$SHELL" -l' "$(cat "$SSH_CALL_LOG")" \
+	"pj-sbx-ssh resolves the task name to the same slug spawn/teardown use before invoking ssh, and lands the session in /workspace"
 
 rm -f "$SSH_CALL_LOG"
 

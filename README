@@ -57,6 +57,8 @@ Segments, each a no-op when not applicable:
 - `python_prompt_info` -- active virtualenv name, or pyenv version if no
   virtualenv is active.
 - `aws_prompt_info` -- `$AWS_PROFILE`, if set.
+- `ssh_prompt_info` -- an icon shown when the shell is inside an SSH
+  session (`$SSH_CONNECTION`/`$SSH_TTY` set).
 
 ## local/ (private/machine-specific config)
 
@@ -130,8 +132,8 @@ credentials.
   worktree and branch are left untouched, so the same task name can be
   resumed later with another `pj-sbx-spawn`.
 - `pj-sbx-ssh <task-name>` -- connects to a running sandbox from a
-  terminal (resolves the same task-name slug spawn/teardown use, then hands
-  off to the system `ssh`).
+  terminal, landing in `/workspace` (resolves the same task-name slug
+  spawn/teardown use, then hands off to the system `ssh`).
 
 ### What's inside every sandbox
 

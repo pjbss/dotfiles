@@ -118,6 +118,12 @@ function aws_prompt_info() {
   echo "$ZSH_THEME_AWS_PROMPT_PREFIX$AWS_PROFILE$ZSH_THEME_AWS_PROMPT_SUFFIX"
 }
 
+# Shows an icon when the shell is inside an SSH session. No-op otherwise.
+function ssh_prompt_info() {
+  [[ -z "$SSH_CONNECTION$SSH_TTY" ]] && return
+  echo "$ZSH_THEME_SSH_PROMPT_PREFIX$ZSH_THEME_SSH_PROMPT_ICON$ZSH_THEME_SSH_PROMPT_SUFFIX"
+}
+
 #compare the provided version of git to the version installed and on path
 #prints 1 if input version <= installed version
 #prints -1 otherwise 

@@ -169,6 +169,41 @@ assert_eq "portForwards:
   hostPort: 60101" "$forwards_yaml" \
 	"sandbox_port_forwards_yaml renders a portForwards YAML block, one list item per mapping"
 
+# --- sandbox_port_forwards_yaml: template-contributed static fragment (issue 013) ---
+#
+# A directory template's port_forwards.yaml (e.g. an `ignore: true` rule
+# suppressing Lima's own built-in "forward every guest port on 127.0.0.1"
+# catch-all -- see lima-vm/lima#2901) must combine with --ports' own
+# dynamic mappings into the SAME portForwards: list, and must still render
+# even when there are no --ports mappings at all.
+
+template_fragment_ignore="$(mktemp)"
+cat > "$template_fragment_ignore" <<-'EOF'
+	- guestPort: 6379
+	  ignore: true
+	EOF
+
+assert_eq "portForwards:
+- guestPort: 6379
+  ignore: true" "$(sandbox_port_forwards_yaml "" "$template_fragment_ignore")" \
+	"sandbox_port_forwards_yaml renders a template's static fragment even with no --ports mappings at all"
+
+assert_eq "portForwards:
+- guestPort: 8000
+  hostPort: 60100
+- guestPort: 6379
+  ignore: true" "$(sandbox_port_forwards_yaml "8000:60100" "$template_fragment_ignore")" \
+	"sandbox_port_forwards_yaml combines --ports' dynamic mappings and a template's static fragment in one portForwards: list"
+
+assert_eq "" "$(sandbox_port_forwards_yaml "" "")" \
+	"sandbox_port_forwards_yaml prints nothing when both mappings and the template fragment are empty"
+
+nonexistent_fragment="$(mktemp -u)"
+assert_eq "" "$(sandbox_port_forwards_yaml "" "$nonexistent_fragment")" \
+	"sandbox_port_forwards_yaml prints nothing for a nonexistent template fragment path"
+
+rm -f "$template_fragment_ignore"
+
 # --- sandbox_render_lima_config ---
 
 fixture_template="$(mktemp)"
@@ -327,7 +362,43 @@ assert_eq "ssh:
 mounts: []" "$rendered_without_ports" \
 	"sandbox_render_lima_config with no --ports mapping yields the same output as before issue 005"
 
-rm -f "$fixture_template_ports"
+# --- sandbox_render_lima_config: a directory template's port_forwards.yaml (issue 013) ---
+
+fixture_port_forwards_fragment="$(mktemp)"
+cat > "$fixture_port_forwards_fragment" <<-'EOF'
+	- guestPort: 6379
+	  ignore: true
+	EOF
+
+rendered_with_template_forwards_no_ports="$(sandbox_render_lima_config "$fixture_template_ports" 60099 /tmp/some-worktree '' '' '' '' '' '' "$fixture_port_forwards_fragment")"
+
+case "$rendered_with_template_forwards_no_ports" in
+*'portForwards:'*'guestPort: 6379'*'ignore: true'*)
+	echo "PASS: a directory template's port_forwards.yaml renders a portForwards: block even with --ports omitted entirely" ;;
+*)
+	echo "FAIL: a directory template's port_forwards.yaml renders a portForwards: block even with --ports omitted entirely (got: $rendered_with_template_forwards_no_ports)"
+	failures=$((failures + 1)) ;;
+esac
+
+rendered_with_both="$(sandbox_render_lima_config "$fixture_template_ports" 60099 /tmp/some-worktree '' '' '' '' "8000:60100" '' "$fixture_port_forwards_fragment")"
+
+case "$rendered_with_both" in
+*'portForwards:'*'guestPort: 8000'*'hostPort: 60100'*'guestPort: 6379'*'ignore: true'*)
+	echo "PASS: --ports' dynamic mapping and a directory template's port_forwards.yaml combine into one portForwards: list" ;;
+*)
+	echo "FAIL: --ports' dynamic mapping and a directory template's port_forwards.yaml combine into one portForwards: list (got: $rendered_with_both)"
+	failures=$((failures + 1)) ;;
+esac
+
+python3 -c "
+import yaml
+d = yaml.safe_load('''$rendered_with_both''')
+assert len(d['portForwards']) == 2, d['portForwards']
+print('OK')
+" && echo "PASS: the combined portForwards: block parses as one valid YAML list, not two colliding keys" \
+	|| { echo "FAIL: the combined portForwards: block parses as one valid YAML list, not two colliding keys"; failures=$((failures + 1)); }
+
+rm -f "$fixture_port_forwards_fragment" "$fixture_template_ports"
 
 if grep -qF '__SANDBOX_PORT_FORWARDS__' "$SANDBOX_DIR/lima-template.yaml"; then
 	echo "PASS: lima-template.yaml contains the __SANDBOX_PORT_FORWARDS__ placeholder (issue 005)"
@@ -342,6 +413,201 @@ else
 	echo "FAIL: lima-template.yaml contains the __SANDBOX_BASE_PROVISION__ placeholder (issue 003)"
 	failures=$((failures + 1))
 fi
+
+if grep -qF '__SANDBOX_BASE_MOUNTS__' "$SANDBOX_DIR/lima-template.yaml"; then
+	echo "PASS: lima-template.yaml contains the __SANDBOX_BASE_MOUNTS__ placeholder (issue 010)"
+else
+	echo "FAIL: lima-template.yaml contains the __SANDBOX_BASE_MOUNTS__ placeholder (issue 010)"
+	failures=$((failures + 1))
+fi
+
+# --- sandbox_render_lima_config: directory-shaped --base templates' extra mounts (issue 010) ---
+
+. "$SANDBOX_DIR/lib/base_template.sh"
+
+fixture_template_dir_base="$(mktemp)"
+cat > "$fixture_template_dir_base" <<-'EOF'
+	mounts:
+	- location: "/existing/mount"
+	  mountPoint: "/existing/mount"
+	  writable: false
+	__SANDBOX_BASE_MOUNTS__
+
+	provision:
+	- mode: system
+	  script: |
+	    echo "base provisioning"
+	__SANDBOX_BASE_PROVISION__
+	EOF
+
+# A directory template with only provision.yaml (no mounts.yaml) must
+# render identically to a flat-file template: its provisioning splices in,
+# and the mounts: list gains no extra entries.
+
+dir_template_provision_only="$(mktemp -d)"
+cat > "$dir_template_provision_only/provision.yaml" <<-'EOF'
+	- mode: system
+	  script: |
+	    echo "DIR_TEMPLATE_PROVISION_ONLY"
+	EOF
+
+resolved_provision_only="$(sandbox_base_template_provision_path "$dir_template_provision_only")"
+resolved_mounts_absent="$(sandbox_base_template_mounts_path "$dir_template_provision_only")"
+
+rendered_dir_provision_only="$(sandbox_render_lima_config "$fixture_template_dir_base" 60099 /tmp/some-worktree '' '' '' "$resolved_provision_only" '' "$resolved_mounts_absent")"
+rendered_flat_equivalent="$(sandbox_render_lima_config "$fixture_template_dir_base" 60099 /tmp/some-worktree '' '' '' "$resolved_provision_only" '' '')"
+
+case "$rendered_dir_provision_only" in
+*DIR_TEMPLATE_PROVISION_ONLY*) echo "PASS: a directory template's provision.yaml (no mounts.yaml) still splices its provisioning" ;;
+*) echo "FAIL: a directory template's provision.yaml (no mounts.yaml) still splices its provisioning"; failures=$((failures + 1)) ;;
+esac
+
+case "$rendered_dir_provision_only" in
+*__SANDBOX_BASE_MOUNTS__*) echo "FAIL: sandbox_render_lima_config removes the __SANDBOX_BASE_MOUNTS__ placeholder when no mounts fragment is given"; failures=$((failures + 1)) ;;
+*) echo "PASS: sandbox_render_lima_config removes the __SANDBOX_BASE_MOUNTS__ placeholder when no mounts fragment is given" ;;
+esac
+
+mount_entry_count_provision_only="$(printf '%s\n' "$rendered_dir_provision_only" | grep -c '^- location:')"
+assert_eq "1" "$mount_entry_count_provision_only" \
+	"a directory template with only provision.yaml adds no extra mounts: entries"
+
+assert_eq "$rendered_flat_equivalent" "$rendered_dir_provision_only" \
+	"a directory template with only provision.yaml (no mounts.yaml) renders identically whether BASE_MOUNTS is empty-string or omitted"
+
+# A directory template with both provision.yaml and mounts.yaml splices
+# both: provisioning at __SANDBOX_BASE_PROVISION__, extra mount(s) at
+# __SANDBOX_BASE_MOUNTS__.
+
+dir_template_both="$(mktemp -d)"
+cat > "$dir_template_both/provision.yaml" <<-'EOF'
+	- mode: system
+	  script: |
+	    echo "DIR_TEMPLATE_BOTH_PROVISION"
+	EOF
+cat > "$dir_template_both/mounts.yaml" <<-'EOF'
+	- location: "/host/extra"
+	  mountPoint: "/guest/extra"
+	  writable: false
+	EOF
+
+resolved_provision_both="$(sandbox_base_template_provision_path "$dir_template_both")"
+resolved_mounts_both="$(sandbox_base_template_mounts_path "$dir_template_both")"
+
+rendered_dir_both="$(sandbox_render_lima_config "$fixture_template_dir_base" 60099 /tmp/some-worktree '' '' '' "$resolved_provision_both" '' "$resolved_mounts_both")"
+
+case "$rendered_dir_both" in
+*DIR_TEMPLATE_BOTH_PROVISION*) echo "PASS: a directory template with both files splices its provisioning" ;;
+*) echo "FAIL: a directory template with both files splices its provisioning"; failures=$((failures + 1)) ;;
+esac
+
+case "$rendered_dir_both" in
+*'location: "/host/extra"'*'mountPoint: "/guest/extra"'*) echo "PASS: a directory template with both files splices its extra mount into the mounts: list" ;;
+*) echo "FAIL: a directory template with both files splices its extra mount into the mounts: list (got: $rendered_dir_both)"; failures=$((failures + 1)) ;;
+esac
+
+mount_entry_count_both="$(printf '%s\n' "$rendered_dir_both" | grep -c '^- location:')"
+assert_eq "2" "$mount_entry_count_both" \
+	"a directory template with both files leaves the pre-existing mount plus exactly one extra mount entry"
+
+# A directory template with only mounts.yaml (no provision.yaml) splices
+# only the extra mount, no additional provision: item.
+
+dir_template_mounts_only="$(mktemp -d)"
+cat > "$dir_template_mounts_only/mounts.yaml" <<-'EOF'
+	- location: "/host/mounts-only"
+	  mountPoint: "/guest/mounts-only"
+	  writable: false
+	EOF
+
+resolved_provision_mounts_only="$(sandbox_base_template_provision_path "$dir_template_mounts_only")"
+resolved_mounts_mounts_only="$(sandbox_base_template_mounts_path "$dir_template_mounts_only")"
+
+rendered_mounts_only="$(sandbox_render_lima_config "$fixture_template_dir_base" 60099 /tmp/some-worktree '' '' '' "$resolved_provision_mounts_only" '' "$resolved_mounts_mounts_only")"
+
+case "$rendered_mounts_only" in
+*'location: "/host/mounts-only"'*'mountPoint: "/guest/mounts-only"'*) echo "PASS: a directory template with only mounts.yaml splices its extra mount" ;;
+*) echo "FAIL: a directory template with only mounts.yaml splices its extra mount (got: $rendered_mounts_only)"; failures=$((failures + 1)) ;;
+esac
+
+provision_item_count_mounts_only="$(printf '%s\n' "$rendered_mounts_only" | grep -c 'mode: system')"
+assert_eq "1" "$provision_item_count_mounts_only" \
+	"a directory template with only mounts.yaml adds no extra provision: item (just the base fixture's own one)"
+
+case "$rendered_mounts_only" in
+*DIR_TEMPLATE*) echo "FAIL: a directory template with only mounts.yaml adds no extra provision: item"; failures=$((failures + 1)) ;;
+*) echo "PASS: a directory template with only mounts.yaml adds no extra provision: item" ;;
+esac
+
+rm -rf "$fixture_template_dir_base" "$dir_template_provision_only" "$dir_template_both" "$dir_template_mounts_only"
+
+# --- a directory template's files manifest combines with its own provision.yaml (issue 012) ---
+#
+# No lima-template.yaml/sandbox_render_lima_config change needed for this:
+# a `mode: data` entry is just another item in the same `provision:` list
+# `mode: system` entries already live in, so the caller (pj-sbx-spawn)
+# concatenates provision.yaml's content with
+# sandbox_base_template_files_provision_yaml's generated output into one
+# file *before* it ever reaches sandbox_render_lima_config's existing
+# BASE_TEMPLATE argument -- proven here directly, without needing any new
+# placeholder.
+
+fixture_template_provision_only="$(mktemp)"
+cat > "$fixture_template_provision_only" <<-'EOF'
+	provision:
+	- mode: system
+	  script: |
+	    echo "base provisioning"
+	__SANDBOX_BASE_PROVISION__
+	EOF
+
+dir_template_with_files="$(mktemp -d)"
+cat > "$dir_template_with_files/provision.yaml" <<-'EOF'
+	- mode: system
+	  script: |
+	    echo "DIR_TEMPLATE_WITH_FILES_PROVISION"
+	EOF
+
+host_file_for_render_test="$(mktemp)"
+printf 'credential file content\n' > "$host_file_for_render_test"
+echo "$host_file_for_render_test:/guest/path/cred" > "$dir_template_with_files/files"
+
+resolved_provision_with_files="$(sandbox_base_template_provision_path "$dir_template_with_files")"
+resolved_files_manifest="$(sandbox_base_template_files_path "$dir_template_with_files")"
+
+combined_provision_file="$(mktemp)"
+cat "$resolved_provision_with_files" > "$combined_provision_file"
+sandbox_base_template_files_provision_yaml "$resolved_files_manifest" >> "$combined_provision_file"
+
+rendered_with_files="$(sandbox_render_lima_config "$fixture_template_provision_only" 60099 /tmp/some-worktree '' '' '' "$combined_provision_file")"
+
+case "$rendered_with_files" in
+*DIR_TEMPLATE_WITH_FILES_PROVISION*) echo "PASS: the combined splice still includes the directory template's own provision.yaml script" ;;
+*) echo "FAIL: the combined splice still includes the directory template's own provision.yaml script"; failures=$((failures + 1)) ;;
+esac
+
+case "$rendered_with_files" in
+*'mode: data'*'path: "/guest/path/cred"'*) echo "PASS: the combined splice includes the generated mode: data entry for the files manifest" ;;
+*) echo "FAIL: the combined splice includes the generated mode: data entry for the files manifest (got: $rendered_with_files)"; failures=$((failures + 1)) ;;
+esac
+
+rendered_with_files_yaml_file="$(mktemp)"
+sandbox_render_lima_config "$fixture_template_provision_only" 60099 /tmp/some-worktree '' '' '' "$combined_provision_file" > "$rendered_with_files_yaml_file"
+
+python3 -c "
+import yaml
+d = yaml.safe_load(open('$rendered_with_files_yaml_file'))
+items = d['provision']
+assert len(items) == 3, items
+assert items[0]['mode'] == 'system' and 'base provisioning' in items[0]['script']
+assert items[1]['mode'] == 'system' and 'DIR_TEMPLATE_WITH_FILES_PROVISION' in items[1]['script']
+assert items[2]['mode'] == 'data' and items[2]['path'] == '/guest/path/cred'
+assert items[2]['content'] == 'credential file content\n', repr(items[2]['content'])
+print('OK')
+" && echo "PASS: the combined splice parses as valid YAML with the base script, template script, and data entry as three distinct provision: items in order" \
+	|| { echo "FAIL: the combined splice parses as valid YAML with the base script, template script, and data entry as three distinct provision: items in order"; failures=$((failures + 1)); }
+
+rm -f "$fixture_template_provision_only" "$host_file_for_render_test" "$combined_provision_file" "$rendered_with_files_yaml_file"
+rm -rf "$dir_template_with_files"
 
 # --- credential mounts in the real base template (issue 004) ---
 

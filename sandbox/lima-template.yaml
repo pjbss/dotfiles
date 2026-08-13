@@ -49,6 +49,15 @@
 # allocated host port per listed guest port (sandbox_allocate_ports), or
 # nothing at all when `--ports` is omitted -- identical to today's SSH-only
 # forwarding.
+#
+# __SANDBOX_BASE_MOUNTS__ (issue 010, see issues/prd-local-templates.md) is
+# spliced the same sed r/d way as __SANDBOX_BASE_PROVISION__ below: a
+# directory-shaped `--base` template may supply a `mounts.yaml` fragment
+# (sandbox_base_template_mounts_path, sandbox/lib/base_template.sh) of raw
+# `- location: ...` / `mountPoint: ...` / `writable: ...` list items,
+# inserted right at this placeholder so they become additional entries in
+# the same `mounts:` list below -- or nothing at all for a flat-file
+# template, or a directory template with no `mounts.yaml`.
 
 minimumLimaVersion: 2.0.0
 
@@ -76,6 +85,7 @@ mounts:
 - location: "__SANDBOX_REPO_GITDIR__"
   mountPoint: "__SANDBOX_REPO_GITDIR__"
   writable: true
+__SANDBOX_BASE_MOUNTS__
 
 # Docker, Node/npm, git-lfs, and the Claude Code/GitHub CLI/GitHub Copilot
 # CLIs, unconditionally (issue 008: "Docker itself is available inside

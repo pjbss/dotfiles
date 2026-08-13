@@ -20,7 +20,10 @@
 # one exception that touches the real sandbox/templates/ directory (a
 # throwaway fixture file, removed via `trap` even on failure) rather than
 # a fixture dir, since that's the actual directory issue 004 requires it
-# to enumerate.
+# to enumerate. The local-template-merge cases (issue 009, see
+# issues/prd-local-templates.md) touch the real, normally-nonexistent
+# $DOTFILES_HOME/local/sandbox/templates/ the same way, via a `trap`-
+# guarded fixture directory created and torn down within the test.
 
 set -euo pipefail
 
@@ -214,6 +217,91 @@ esac
 
 rm -f "$real_templates_dir/$fixture_template_name"
 trap - EXIT
+
+# --- local templates merge into --base list/--help, tagged (issue 009) ---
+#
+# Deliberately does not assume $DOTFILES_HOME/local/sandbox/templates/
+# doesn't already exist on this machine (issue 011 populates it for real
+# with a `webtools` template) -- only ever adds/removes this test's own
+# two fixture files, and only removes the directories it created itself,
+# so a developer's real local templates are never at risk from this test.
+
+real_local_templates_dir="$DOTFILES_HOME/local/sandbox/templates"
+real_local_sandbox_dir="$DOTFILES_HOME/local/sandbox"
+fixture_local_only_name="__pj_sbx_spawn_test_fixture_local_only__"
+fixture_collision_name="__pj_sbx_spawn_test_fixture_collision__"
+
+preexisting_local_templates_dir=0
+[ -d "$real_local_templates_dir" ] && preexisting_local_templates_dir=1
+preexisting_local_sandbox_dir=0
+[ -d "$real_local_sandbox_dir" ] && preexisting_local_sandbox_dir=1
+
+cleanup_local_fixtures() {
+	rm -f "$real_local_templates_dir/$fixture_local_only_name" "$real_local_templates_dir/$fixture_collision_name"
+	rm -f "$real_templates_dir/$fixture_collision_name"
+	[ "$preexisting_local_templates_dir" -eq 0 ] && rmdir "$real_local_templates_dir" 2>/dev/null
+	[ "$preexisting_local_sandbox_dir" -eq 0 ] && rmdir "$real_local_sandbox_dir" 2>/dev/null
+	true
+}
+trap cleanup_local_fixtures EXIT
+
+mkdir -p "$real_local_templates_dir"
+touch "$real_local_templates_dir/$fixture_local_only_name"
+touch "$real_templates_dir/$fixture_collision_name"
+touch "$real_local_templates_dir/$fixture_collision_name"
+
+run_spawn --base list
+
+case "$spawn_output" in
+*"$fixture_local_only_name (local)"*) echo "PASS: pj-sbx-spawn --base list tags a local-only template name '(local)'" ;;
+*) echo "FAIL: pj-sbx-spawn --base list tags a local-only template name '(local)' (got: $spawn_output)"; failures=$((failures + 1)) ;;
+esac
+
+case "$spawn_output" in
+*"$fixture_collision_name (local)"*) echo "PASS: pj-sbx-spawn --base list tags a name present in both dirs '(local)' (local wins)" ;;
+*) echo "FAIL: pj-sbx-spawn --base list tags a name present in both dirs '(local)' (local wins) (got: $spawn_output)"; failures=$((failures + 1)) ;;
+esac
+
+run_spawn --help
+
+case "$spawn_output" in
+*"$fixture_local_only_name (local)"*) echo "PASS: pj-sbx-spawn --help tags a local-only template name '(local)'" ;;
+*) echo "FAIL: pj-sbx-spawn --help tags a local-only template name '(local)' (got: $spawn_output)"; failures=$((failures + 1)) ;;
+esac
+
+cleanup_local_fixtures
+trap - EXIT
+
+# --- a nonexistent local/sandbox/templates/ doesn't break --base list/--help ---
+#
+# Checked dynamically (never forced by mkdir/rmdir here) since this
+# directory legitimately may already exist and hold a developer's real
+# local templates (issue 011's `webtools`, or others) -- unlike the
+# fixture block above, this test must never create or remove it itself.
+# The equivalent case with a guaranteed-absent directory is already
+# covered at the unit level in base_template_test.sh.
+
+if [ ! -e "$real_local_templates_dir" ]; then
+	run_spawn --base list
+
+	if [ "$spawn_rc" -eq 0 ]; then
+		echo "PASS: pj-sbx-spawn --base list exits 0 when local/sandbox/templates/ doesn't exist"
+	else
+		echo "FAIL: pj-sbx-spawn --base list exits 0 when local/sandbox/templates/ doesn't exist (got exit $spawn_rc, output: $spawn_output)"
+		failures=$((failures + 1))
+	fi
+
+	run_spawn --help
+
+	if [ "$spawn_rc" -eq 0 ]; then
+		echo "PASS: pj-sbx-spawn --help exits 0 when local/sandbox/templates/ doesn't exist"
+	else
+		echo "FAIL: pj-sbx-spawn --help exits 0 when local/sandbox/templates/ doesn't exist (got exit $spawn_rc, output: $spawn_output)"
+		failures=$((failures + 1))
+	fi
+else
+	echo "SKIP: local/sandbox/templates/ already exists on this machine -- absent-directory case covered at the unit level instead"
+fi
 
 # --- --help / -h (issue 007) ---
 

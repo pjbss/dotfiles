@@ -69,18 +69,24 @@ while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
 BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
 . "$DOTFILES_HOME/sandbox/lib/base_template.sh"
 
 templates_dir="$DOTFILES_HOME/sandbox/templates"
+
+# Gitignored, machine/company-specific --base templates (issue 009 --
+# see issues/prd-local-templates.md): merged with templates_dir above by
+# every sandbox_base_template_* call below, local wins on a name
+# collision. Doesn't need to exist -- see local/ in the README.
+local_templates_dir="$DOTFILES_HOME/local/sandbox/templates"
 
 for arg in "$@"; do
 	case "$arg" in
 		--help | -h)
 			sandbox_script_help "$SOURCE"
 			echo
-			echo "Available --base names:"
-			sandbox_base_template_list "$templates_dir" | sed 's/^/  /'
+			sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
 			exit 0
 			;;
 	esac
@@ -113,24 +119,42 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$base_name" = "list" ]; then
-	sandbox_base_template_list "$templates_dir"
+	sandbox_base_template_list "$templates_dir" "$local_templates_dir"
 	exit 0
 fi
 
 if [ -z "$task_name" ]; then
-	echo "usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] -- valid --base names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
+	{
+		printf '%sUsage:%s pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>]\n\n' "$C_BOLD" "$C_RESET"
+		sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
+	} >&2
 	exit 1
 fi
 
 if [ -z "$base_name" ]; then
-	echo "pj-sbx-spawn: --base <name> is required -- valid names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
+	{
+		printf '%spj-sbx-spawn:%s --base <name> is required\n\n' "$C_RED" "$C_RESET"
+		sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
+	} >&2
 	exit 1
 fi
 
-if ! base_template_path="$(sandbox_base_template_path "$templates_dir" "$base_name")"; then
-	echo "pj-sbx-spawn: unrecognized --base '$base_name' -- valid names: $(sandbox_base_template_list "$templates_dir" | tr '\n' ' ')" >&2
+if ! base_template_path="$(sandbox_base_template_path "$templates_dir" "$local_templates_dir" "$base_name")"; then
+	{
+		printf "%spj-sbx-spawn:%s unrecognized --base '%s'\n\n" "$C_RED" "$C_RESET" "$base_name"
+		sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
+	} >&2
 	exit 1
 fi
+
+# base_template_path may be a flat file (today's shape) or a directory
+# (issue 010, for a template needing more than a provisioning script) --
+# these derive the provisioning-script/extra-mounts/extra-files/extra-
+# port-forward-rule fragments to splice from either shape uniformly.
+base_provision_path="$(sandbox_base_template_provision_path "$base_template_path")"
+base_mounts_path="$(sandbox_base_template_mounts_path "$base_template_path")"
+base_files_manifest_path="$(sandbox_base_template_files_path "$base_template_path")"
+base_port_forwards_path="$(sandbox_base_template_port_forwards_path "$base_template_path")"
 
 if [ -n "$ports_arg" ]; then
 	old_ifs="$IFS"
@@ -139,7 +163,7 @@ if [ -n "$ports_arg" ]; then
 		case "$guest_port" in
 			''|*[!0-9]*)
 				IFS="$old_ifs"
-				echo "pj-sbx-spawn: invalid --ports '$ports_arg' -- must be a comma-separated list of port numbers" >&2
+				printf "%spj-sbx-spawn:%s invalid --ports '%s' -- must be a comma-separated list of port numbers\n" "$C_RED" "$C_RESET" "$ports_arg" >&2
 				exit 1
 				;;
 		esac
@@ -148,7 +172,7 @@ if [ -n "$ports_arg" ]; then
 fi
 
 if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
-	echo "pj-sbx-spawn: must be run from inside a git repository" >&2
+	printf "%spj-sbx-spawn:%s must be run from inside a git repository\n" "$C_RED" "$C_RESET" >&2
 	exit 1
 fi
 
@@ -182,7 +206,7 @@ repo_name="$(basename "$(dirname "$repo_gitdir")")"
 instance_name="$(sandbox_instance_name "$task_name")"
 
 if limactl list --json 2>/dev/null | grep -qF "\"name\":\"$instance_name\""; then
-	echo "pj-sbx-spawn: a sandbox named '$instance_name' already exists -- pick a different task name or tear it down first" >&2
+	printf "%spj-sbx-spawn:%s a sandbox named '%s' already exists -- pick a different task name or tear it down first\n" "$C_RED" "$C_RESET" "$instance_name" >&2
 	exit 1
 fi
 
@@ -193,7 +217,7 @@ vm_config="$sandbox_root/lima-configs/$instance_name.yaml"
 mkdir -p "$sandbox_root/worktrees" "$sandbox_root/lima-configs"
 
 worktree_action="$(sandbox_resolve_worktree_action "$repo_root" "$worktree_path" "$instance_name")" || {
-	echo "pj-sbx-spawn: '$worktree_path' exists but isn't a registered git worktree of this repo -- pick a different task name or remove it first" >&2
+	printf "%spj-sbx-spawn:%s '%s' exists but isn't a registered git worktree of this repo -- pick a different task name or remove it first\n" "$C_RED" "$C_RESET" "$worktree_path" >&2
 	exit 1
 }
 
@@ -228,6 +252,17 @@ if [ -n "$ports_arg" ]; then
 	port_mappings="$(sandbox_allocate_ports "$ports_arg")"
 fi
 
+# A directory template's files manifest (issue 012) contributes extra
+# `mode: data` provision entries -- each embedding one host file's content
+# read fresh right now -- rather than a separate placeholder: they're just
+# additional items in the same `provision:` list the template's own
+# provision.yaml (if any) already contributes to, so they're concatenated
+# into one combined file here and passed as sandbox_render_lima_config's
+# existing BASE_TEMPLATE argument, unchanged.
+combined_provision_path="$(mktemp)"
+[ -n "$base_provision_path" ] && cat "$base_provision_path" >> "$combined_provision_path"
+sandbox_base_template_files_provision_yaml "$base_files_manifest_path" >> "$combined_provision_path"
+
 sandbox_render_lima_config \
 	"$DOTFILES_HOME/sandbox/lima-template.yaml" \
 	"$ssh_port" \
@@ -235,8 +270,12 @@ sandbox_render_lima_config \
 	"${AWS_PROFILE:-}" \
 	"$DOTFILES_HOME" \
 	"$repo_gitdir" \
-	"$base_template_path" \
-	"$port_mappings" > "$vm_config"
+	"$combined_provision_path" \
+	"$port_mappings" \
+	"$base_mounts_path" \
+	"$base_port_forwards_path" > "$vm_config"
+
+rm -f "$combined_provision_path"
 
 echo "pj-sbx-spawn: starting Lima VM '$instance_name' (SSH port $ssh_port)..."
 limactl start --name "$instance_name" --tty=false "$vm_config"

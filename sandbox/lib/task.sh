@@ -126,34 +126,62 @@ sandbox_allocate_ports() {
 	done
 }
 
-# sandbox_port_forwards_yaml MAPPINGS
+# sandbox_port_forwards_yaml MAPPINGS [TEMPLATE_FRAGMENT]
 #
 # MAPPINGS is sandbox_allocate_ports' own output (one "guestPort:hostPort"
-# pair per line, or empty). Prints a top-level `portForwards:` YAML block
-# with one list item per pair, for splicing into a rendered Lima config at
-# the `__SANDBOX_PORT_FORWARDS__` placeholder (see
-# sandbox_render_lima_config). Prints nothing for empty input, so omitting
-# `--ports` renders no `portForwards` key at all -- unchanged, SSH-only
-# forwarding.
+# pair per line, or empty). TEMPLATE_FRAGMENT (issue 013) is an optional
+# raw Lima portForwards-list fragment path -- a directory-shaped --base
+# template's port_forwards.yaml (sandbox_base_template_port_forwards_path,
+# base_template.sh), most commonly an `ignore: true` rule suppressing
+# Lima's own built-in "forward every guest port on 127.0.0.1" catch-all
+# for a port the template's own service already listens on (e.g. redis;
+# see lima-vm/lima#2901) -- unrelated to `--ports`' dynamic mappings, but
+# spliced into the exact same `portForwards:` list, since YAML can't merge
+# two top-level keys of the same name.
+#
+# Prints a top-level `portForwards:` YAML block (one list item per
+# mapping, then TEMPLATE_FRAGMENT's raw content appended verbatim) for
+# splicing into a rendered Lima config at the `__SANDBOX_PORT_FORWARDS__`
+# placeholder (see sandbox_render_lima_config). Prints nothing when both
+# MAPPINGS and TEMPLATE_FRAGMENT are empty/absent, so omitting `--ports`
+# with no template contribution either still renders no `portForwards` key
+# at all -- unchanged, SSH-only forwarding.
 sandbox_port_forwards_yaml() {
 	mappings="$1"
+	template_fragment="${2:-}"
 
-	[ -z "$mappings" ] && return 0
+	has_fragment=false
+	if [ -n "$template_fragment" ] && [ -s "$template_fragment" ]; then
+		has_fragment=true
+	fi
+
+	if [ -z "$mappings" ] && ! $has_fragment; then
+		return 0
+	fi
 
 	echo "portForwards:"
-	echo "$mappings" | while IFS=':' read -r guest_port host_port; do
-		[ -z "$guest_port" ] && continue
-		printf -- '- guestPort: %s\n  hostPort: %s\n' "$guest_port" "$host_port"
-	done
+
+	if [ -n "$mappings" ]; then
+		echo "$mappings" | while IFS=':' read -r guest_port host_port; do
+			[ -z "$guest_port" ] && continue
+			printf -- '- guestPort: %s\n  hostPort: %s\n' "$guest_port" "$host_port"
+		done
+	fi
+
+	if $has_fragment; then
+		cat "$template_fragment"
+	fi
 }
 
-# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH] [REPO_GITDIR] [BASE_TEMPLATE] [PORT_FORWARD_MAPPINGS]
+# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH] [REPO_GITDIR] [BASE_TEMPLATE] [PORT_FORWARD_MAPPINGS] [BASE_MOUNTS]
 #
 # Renders a per-task Lima YAML config to stdout: substitutes the SSH port,
 # worktree path, this dotfiles repo's own path, and the spawning repo's
 # real git directory placeholders in TEMPLATE, splices BASE_TEMPLATE's
 # provisioning in at the `__SANDBOX_BASE_PROVISION__` placeholder (see
-# below) and PORT_FORWARD_MAPPINGS' rendered YAML in at the
+# below), BASE_MOUNTS' raw mounts-list fragment in at the
+# `__SANDBOX_BASE_MOUNTS__` placeholder (see further below), and
+# PORT_FORWARD_MAPPINGS' rendered YAML in at the
 # `__SANDBOX_PORT_FORWARDS__` placeholder (see further below), then appends
 # a guest `env: AWS_PROFILE: ...` passthrough stanza -- but only when
 # AWS_PROFILE is non-empty. Lima has no native passthrough of arbitrary
@@ -184,6 +212,26 @@ sandbox_port_forwards_yaml() {
 # placeholder is likewise just deleted, since `sed -e '/pat/r ""'`'s
 # empty-filename behavior differs across sed implementations (confirmed:
 # BSD sed on this Mac errors on it) and isn't worth relying on.
+#
+# BASE_MOUNTS (issue 010) is the raw mounts-list fragment resolved by
+# sandbox_base_template_mounts_path for a directory-shaped `--base`
+# template: one or more `- location: ...` / `mountPoint: ...` /
+# `writable: ...` list items, inserted at TEMPLATE's own
+# `__SANDBOX_BASE_MOUNTS__` placeholder line the same `r`/`d` way
+# BASE_TEMPLATE is, so they become additional entries in the same
+# `mounts:` list already in TEMPLATE rather than a second, YAML-illegal
+# `mounts:` key. Empty/omitted (a flat-file template, or a directory
+# template with no `mounts.yaml`) just deletes the placeholder with
+# nothing inserted.
+#
+# BASE_PORT_FORWARDS (issue 013) is the raw portForwards-list fragment
+# resolved by sandbox_base_template_port_forwards_path for a
+# directory-shaped `--base` template -- combined with
+# PORT_FORWARD_MAPPINGS by sandbox_port_forwards_yaml into the one
+# `portForwards:` block spliced at `__SANDBOX_PORT_FORWARDS__` below, so a
+# template can contribute rules (typically an `ignore: true` for a port
+# its own service listens on) independently of whether `--ports` was ever
+# passed.
 sandbox_render_lima_config() {
 	template="$1"
 	ssh_port="$2"
@@ -193,9 +241,11 @@ sandbox_render_lima_config() {
 	repo_gitdir="${6:-}"
 	base_template="${7:-}"
 	port_forward_mappings="${8:-}"
+	base_mounts="${9:-}"
+	base_port_forwards="${10:-}"
 
 	port_forwards_file="$(mktemp)"
-	sandbox_port_forwards_yaml "$port_forward_mappings" > "$port_forwards_file"
+	sandbox_port_forwards_yaml "$port_forward_mappings" "$base_port_forwards" > "$port_forwards_file"
 
 	sed \
 		-e "s|__SANDBOX_SSH_PORT__|$ssh_port|" \
@@ -207,6 +257,12 @@ sandbox_render_lima_config() {
 				sed -e "/^__SANDBOX_BASE_PROVISION__\$/r $base_template" -e "/^__SANDBOX_BASE_PROVISION__\$/d"
 			else
 				sed -e "/^__SANDBOX_BASE_PROVISION__\$/d"
+			fi
+		} | {
+			if [ -n "$base_mounts" ]; then
+				sed -e "/^__SANDBOX_BASE_MOUNTS__\$/r $base_mounts" -e "/^__SANDBOX_BASE_MOUNTS__\$/d"
+			else
+				sed -e "/^__SANDBOX_BASE_MOUNTS__\$/d"
 			fi
 		} | {
 			if [ -s "$port_forwards_file" ]; then
