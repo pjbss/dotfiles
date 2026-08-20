@@ -82,43 +82,67 @@ assert_eq "$((SANDBOX_SSH_PORT_MIN + 2))" "$with_sandboxes_port" "sandbox_alloca
 
 unset -f limactl
 
-# --- sandbox_allocate_ports (issue 005) ---
+# --- sandbox_allocate_ports (issue 005; guest-port-first scan added later) ---
+
+# Stub `sandbox_host_port_free` the same way `limactl` is stubbed above:
+# shell functions are looked up before PATH, so this shadows the real
+# OS-level bind probe for every test below unless a test overrides it
+# itself. Defaults to "every port is free" so tests exercise only the
+# Lima-claimed-port logic unless they explicitly simulate an OS-level
+# collision.
+sandbox_host_port_free() {
+	return 0
+}
 
 limactl() {
 	echo ""
 }
 
 no_sandboxes_ports="$(sandbox_allocate_ports "8000,5432")"
-assert_eq "8000:$SANDBOX_FORWARD_PORT_MIN
-5432:$((SANDBOX_FORWARD_PORT_MIN + 1))" "$no_sandboxes_ports" \
-	"sandbox_allocate_ports allocates one distinct host port per guest port, from the forward range, when no sandboxes are running"
-
-if echo "$no_sandboxes_ports" | grep -qx "$SANDBOX_SSH_PORT_MIN:.*\|.*:$SANDBOX_SSH_PORT_MIN"; then
-	echo "FAIL: sandbox_allocate_ports never allocates from the SSH port range"
-	failures=$((failures + 1))
-else
-	echo "PASS: sandbox_allocate_ports never allocates from the SSH port range"
-fi
+assert_eq "8000:8000
+5432:5432" "$no_sandboxes_ports" \
+	"sandbox_allocate_ports maps each guest port to that same host port when nothing claims it"
 
 # Another running sandbox's SSH port *and* an existing port forward
 # (config.portForwards[].hostPort -- confirmed against Lima's real
 # limatype.Instance/PortForward JSON field names) must both be skipped.
 limactl() {
 	cat <<-EOF
-	{"name":"task-a","status":"Running","sshLocalPort":$SANDBOX_SSH_PORT_MIN,"config":{"portForwards":[{"guestPort":8000,"hostPort":$SANDBOX_FORWARD_PORT_MIN}]}}
+	{"name":"task-a","status":"Running","sshLocalPort":$SANDBOX_SSH_PORT_MIN,"config":{"portForwards":[{"guestPort":8000,"hostPort":8000}]}}
 	EOF
 }
 
 with_forward_claimed="$(sandbox_allocate_ports "8000")"
-assert_eq "8000:$((SANDBOX_FORWARD_PORT_MIN + 1))" "$with_forward_claimed" \
-	"sandbox_allocate_ports skips a host port already claimed by another running sandbox's port forward"
+assert_eq "8000:8001" "$with_forward_claimed" \
+	"sandbox_allocate_ports scans upward from the guest port when that host port is already claimed by another running sandbox's port forward"
 
-# Two guest ports in the *same* spawn must never collide with each other
-# either, even before either is visible via `limactl list --json`.
+# An OS-level collision (some unrelated host process already bound to the
+# guest port's own number) must be skipped too, even with no sandboxes
+# running at all.
 limactl() {
 	echo ""
 }
+sandbox_host_port_free() {
+	[ "$1" != "5432" ]
+}
 
+with_os_level_collision="$(sandbox_allocate_ports "5432")"
+assert_eq "5432:5433" "$with_os_level_collision" \
+	"sandbox_allocate_ports scans upward from the guest port when that host port is bound by an unrelated host process"
+
+sandbox_host_port_free() {
+	return 0
+}
+
+# EXTRA_RESERVED_PORTS (e.g. this same spawn's own just-allocated SSH port,
+# which won't show up in `limactl list --json` until its VM is up) must
+# also be skipped.
+with_extra_reserved="$(sandbox_allocate_ports "8000" "8000")"
+assert_eq "8000:8001" "$with_extra_reserved" \
+	"sandbox_allocate_ports skips a port passed in as an extra reserved port"
+
+# Two guest ports in the *same* spawn must never collide with each other
+# either, even before either is visible via `limactl list --json`.
 same_call_ports="$(sandbox_allocate_ports "8000,8000")"
 host_port_1="$(echo "$same_call_ports" | sed -n '1p' | cut -d: -f2)"
 host_port_2="$(echo "$same_call_ports" | sed -n '2p' | cut -d: -f2)"
@@ -153,7 +177,23 @@ else
 	failures=$((failures + 1))
 fi
 
-unset -f limactl
+# The upward scan must give up once it reaches SANDBOX_FORWARD_PORT_SCAN_MAX
+# rather than looping forever.
+limactl() {
+	echo ""
+}
+sandbox_host_port_free() {
+	return 1
+}
+
+if SANDBOX_FORWARD_PORT_SCAN_MAX=8002 sandbox_allocate_ports "8000" >/dev/null 2>&1; then
+	echo "FAIL: sandbox_allocate_ports errors once the scan reaches SANDBOX_FORWARD_PORT_SCAN_MAX"
+	failures=$((failures + 1))
+else
+	echo "PASS: sandbox_allocate_ports errors once the scan reaches SANDBOX_FORWARD_PORT_SCAN_MAX"
+fi
+
+unset -f limactl sandbox_host_port_free
 
 # --- sandbox_port_forwards_yaml (issue 005) ---
 

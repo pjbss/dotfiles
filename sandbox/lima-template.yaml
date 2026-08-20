@@ -64,6 +64,8 @@ minimumLimaVersion: 2.0.0
 base:
 - template:_images/ubuntu-lts
 
+memory: "6GiB"
+
 ssh:
   localPort: __SANDBOX_SSH_PORT__
 

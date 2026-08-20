@@ -30,11 +30,10 @@ sandbox_instance_name() {
 SANDBOX_SSH_PORT_MIN="${SANDBOX_SSH_PORT_MIN:-60022}"
 SANDBOX_SSH_PORT_MAX="${SANDBOX_SSH_PORT_MAX:-60099}"
 
-# Defined range for dynamically-allocated forwarded ports (the `--ports`
-# flag), separate from the SSH range above so the two can never collide
-# with each other. Read at call time for the same reason as the SSH range.
-SANDBOX_FORWARD_PORT_MIN="${SANDBOX_FORWARD_PORT_MIN:-60100}"
-SANDBOX_FORWARD_PORT_MAX="${SANDBOX_FORWARD_PORT_MAX:-60999}"
+# Ceiling for sandbox_allocate_ports' upward scan from each requested guest
+# port (see below) -- the highest valid TCP port number. Read at call time
+# for the same reason as the SSH range above.
+SANDBOX_FORWARD_PORT_SCAN_MAX="${SANDBOX_FORWARD_PORT_SCAN_MAX:-65535}"
 
 # sandbox_used_host_ports
 #
@@ -55,6 +54,31 @@ sandbox_used_host_ports() {
 	# runs -- confirmed by reproducing it directly (a plain interactive
 	# bash shell does not have this failure mode, only posix-mode sh).
 	limactl list --json 2>/dev/null | grep -Eo '"(sshLocalPort|hostPort)":[0-9]+' | grep -Eo '[0-9]+$' || true
+}
+
+# sandbox_host_port_free PORT
+#
+# True (exit 0) if PORT is actually free to bind on the host right now,
+# false otherwise. A real OS-level probe -- binds a TCP socket to
+# 127.0.0.1:PORT and immediately closes it -- rather than just consulting
+# sandbox_used_host_ports, since sandbox_allocate_ports (below) now starts
+# its scan at the caller's own requested guest port, which is just as
+# likely to already be claimed by some unrelated host process (e.g. a
+# locally running Postgres on 5432) as by another sandbox. A separate
+# function (rather than inlined) so tests can shadow it the same way they
+# already shadow `limactl`.
+sandbox_host_port_free() {
+	port="$1"
+	python3 -c "
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    s.bind(('127.0.0.1', $port))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()
+" 2>/dev/null
 }
 
 # sandbox_allocate_port
@@ -78,25 +102,37 @@ sandbox_allocate_port() {
 	return 1
 }
 
-# sandbox_allocate_ports GUEST_PORTS
+# sandbox_allocate_ports GUEST_PORTS [EXTRA_RESERVED_PORTS]
 #
 # GUEST_PORTS is a comma-separated list of guest ports (the `--ports`
 # flag's raw value, e.g. "8000,5432"). Prints one "guestPort:hostPort" pair
-# per line, allocating each guest port a distinct free host port from
-# [$SANDBOX_FORWARD_PORT_MIN, $SANDBOX_FORWARD_PORT_MAX] -- skipping any
-# host port already claimed by a running Lima instance
-# (sandbox_used_host_ports) *and* any port this same call already handed
-# out to an earlier guest port in the list, so two guest ports in one spawn
-# never collide with each other either. Because the used-port snapshot
-# comes from currently-running instances, two sandboxes requesting the same
-# guest port never collide as long as each spawn's own VM is up (and thus
-# visible to `limactl list`) before the next spawn allocates -- the same
-# assumption sandbox_allocate_port already relies on for SSH ports. Errors
-# if the range is exhausted before every guest port is assigned.
+# per line: for each guest port, the host port is that same port number if
+# it's free, otherwise the first free port found by scanning upward from it
+# (up to $SANDBOX_FORWARD_PORT_SCAN_MAX) -- so a guest port is reachable at
+# the identical host port whenever possible, matching what a user passing
+# e.g. `--ports 5001` expects to find at localhost:5001. "Free" means both
+# not claimed by a running Lima instance (sandbox_used_host_ports) *and*
+# actually bindable on the host right now (sandbox_host_port_free) -- the
+# latter because, unlike the old fixed dynamic range, a guest port's own
+# number is just as likely to already be in use by some unrelated host
+# process. EXTRA_RESERVED_PORTS is an optional space/newline-separated list
+# of additional ports to treat as claimed -- e.g. the SSH port this same
+# spawn just allocated via sandbox_allocate_port, which won't show up in
+# sandbox_used_host_ports until the VM it belongs to is actually up. Also
+# skips any port this same call already handed out to an earlier guest port
+# in the list, so two guest ports in one spawn never collide with each
+# other either. Because the used-port snapshot comes from currently-running
+# instances, two sandboxes requesting the same guest port never collide as
+# long as each spawn's own VM is up (and thus visible to `limactl list`)
+# before the next spawn allocates -- the same assumption sandbox_allocate_port
+# already relies on for SSH ports. Errors if the scan reaches
+# $SANDBOX_FORWARD_PORT_SCAN_MAX before a guest port is assigned a host port.
 sandbox_allocate_ports() {
 	guest_ports_csv="$1"
+	extra_reserved="${2:-}"
 
 	used_ports="$(sandbox_used_host_ports)"
+	[ -n "$extra_reserved" ] && used_ports="$(printf '%s\n%s' "$used_ports" "$extra_reserved")"
 
 	old_ifs="$IFS"
 	IFS=','
@@ -106,10 +142,10 @@ sandbox_allocate_ports() {
 	for guest_port in "$@"; do
 		[ -z "$guest_port" ] && continue
 
-		port="$SANDBOX_FORWARD_PORT_MIN"
+		port="$guest_port"
 		host_port=""
-		while [ "$port" -le "$SANDBOX_FORWARD_PORT_MAX" ]; do
-			if ! echo "$used_ports" | grep -qx "$port"; then
+		while [ "$port" -le "$SANDBOX_FORWARD_PORT_SCAN_MAX" ]; do
+			if ! echo "$used_ports" | grep -qx "$port" && sandbox_host_port_free "$port"; then
 				host_port="$port"
 				break
 			fi
@@ -117,7 +153,7 @@ sandbox_allocate_ports() {
 		done
 
 		if [ -z "$host_port" ]; then
-			echo "sandbox_allocate_ports: no free port in range $SANDBOX_FORWARD_PORT_MIN-$SANDBOX_FORWARD_PORT_MAX" >&2
+			echo "sandbox_allocate_ports: no free port at or above $guest_port (scanned up to $SANDBOX_FORWARD_PORT_SCAN_MAX)" >&2
 			return 1
 		fi
 

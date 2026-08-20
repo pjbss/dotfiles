@@ -54,13 +54,14 @@
 # branch/worktree/VM.
 #
 # --ports <comma-separated-list> is optional: each listed guest port (e.g.
-# `--ports 8000,5432`) is forwarded to a distinct, dynamically-allocated
-# free host port (sandbox_allocate_ports, sandbox/lib/task.sh), never
-# reusing a host port already claimed by another running sandbox -- so the
-# same project can run in multiple sandboxes at once without their
-# forwarded ports colliding. The resulting host<->guest mapping is printed
-# once the VM is up. Omitting `--ports` leaves forwarding unchanged
-# (SSH-only).
+# `--ports 8000,5432`) is forwarded to that same host port when it's free,
+# or otherwise to the first free port found scanning upward from it
+# (sandbox_allocate_ports, sandbox/lib/task.sh) -- never reusing a host
+# port already claimed by another running sandbox, nor one already bound
+# by some unrelated host process, so the same project can run in multiple
+# sandboxes at once without their forwarded ports colliding. The resulting
+# host<->guest mapping is printed once the VM is up. Omitting `--ports`
+# leaves forwarding unchanged (SSH-only).
 
 set -eu
 
@@ -249,7 +250,7 @@ ssh_port="$(sandbox_allocate_port)"
 
 port_mappings=""
 if [ -n "$ports_arg" ]; then
-	port_mappings="$(sandbox_allocate_ports "$ports_arg")"
+	port_mappings="$(sandbox_allocate_ports "$ports_arg" "$ssh_port")"
 fi
 
 # A directory template's files manifest (issue 012) contributes extra
