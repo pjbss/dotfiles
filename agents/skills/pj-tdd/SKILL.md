@@ -53,7 +53,7 @@ Repeat per behavior identified above:
   file, run the full test suite once more, add a `## Resolution notes`
   section describing what was actually built/decided (especially anything
   that deviated from the original "What to build"), then move the file
-  into `issues/done/`.
+  into `issues/done/`. The `issues` directory may not be in git source control, so you must move the file via `mv` rather than `git mv`.
 - **Partial completion** (some criteria are HITL-only per the flag above):
   leave those specific boxes unchecked, add a `## Notes (autonomous pass,
   <date>)` section explaining exactly what's left and why, and leave the

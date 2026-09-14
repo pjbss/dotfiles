@@ -19,7 +19,10 @@ or edits a file, and it never writes implementation code.
 2. **Explore the codebase before asking the user anything.** Look for
    existing modules, conventions, related features, and prior art that
    could answer a question outright. Never ask the user something the
-   code can already tell you.
+   code can already tell you. Use sub-agents as needed to explore the codebase, 
+   but do not write any code or create any files during this skill. Make sure
+   that you understand the codebase and you keep track of file paths and 
+   line numbers for any references you make to the user.
 
 3. **Ask questions in focused batches**, not one at a time. Cover, as
    relevant to the request:

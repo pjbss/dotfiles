@@ -41,7 +41,7 @@
 # no matter how many times you reconnect (confirmed directly; see the
 # comment above the relevant block below for the full explanation).
 #
-# Usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--help|-h]
+# Usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>] [--help|-h]
 #
 # --base <name> is required and single-valued (no comma-separated/combined
 # templates): it selects one of the named provisioning templates under
@@ -62,6 +62,22 @@
 # sandboxes at once without their forwarded ports colliding. The resulting
 # host<->guest mapping is printed once the VM is up. Omitting `--ports`
 # leaves forwarding unchanged (SSH-only).
+#
+# --post-create <path-or-command> is optional (see
+# issues/prd-post-create.md): if the value resolves to an existing file on
+# the host, relative to the repo root (sandbox_post_create_resolve,
+# sandbox/lib/post_create.sh), its content is read fresh at spawn time and
+# run in the guest as a script; otherwise the value itself is run verbatim
+# as a shell command. Either way it runs over SSH as the regular guest
+# user, with /workspace as the working directory, once the guest bootstrap
+# above (dotfiles sync, zsh handoff, token forwarding, Atlassian MCP
+# registration) has completed. Runs once per worktree: for both a
+# brand-new branch+worktree and "attach" (an existing branch getting a new
+# worktree), but not "resume" (reusing a worktree left behind by a prior
+# teardown), since that worktree's on-disk state -- including anything a
+# prior `--post-create` already installed -- persists across teardown. A
+# non-zero exit aborts pj-sbx-spawn immediately, leaving the
+# branch/worktree/VM already created in place (no rollback).
 
 set -eu
 
@@ -97,10 +113,12 @@ done
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
 . "$DOTFILES_HOME/sandbox/lib/worktree.sh"
 . "$DOTFILES_HOME/sandbox/lib/workspace.sh"
+. "$DOTFILES_HOME/sandbox/lib/post_create.sh"
 
 task_name=""
 base_name=""
 ports_arg=""
+post_create_value=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -110,6 +128,10 @@ while [ $# -gt 0 ]; do
 			;;
 		--ports)
 			ports_arg="${2:-}"
+			shift 2
+			;;
+		--post-create)
+			post_create_value="${2:-}"
 			shift 2
 			;;
 		*)
@@ -126,7 +148,7 @@ fi
 
 if [ -z "$task_name" ]; then
 	{
-		printf '%sUsage:%s pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>]\n\n' "$C_BOLD" "$C_RESET"
+		printf '%sUsage:%s pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>]\n\n' "$C_BOLD" "$C_RESET"
 		sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
 	} >&2
 	exit 1
@@ -452,6 +474,27 @@ json.dump(d, open(path, "w"), indent=2)
 	fi
 	PJSANDBOX_GUEST_BOOTSTRAP
 unset gh_token claude_token
+
+# --post-create (issue 014, see issues/prd-post-create.md) runs in its own
+# SSH step immediately after the guest bootstrap above, so it can rely on
+# the same dotfiles/forwarded-auth/zsh environment a real interactive
+# session already has. Only for "create"/"attach" -- a "resume"d worktree
+# already has whatever an earlier --post-create run installed on disk.
+# Piped over stdin as a `sh -s` script rather than embedded in the ssh
+# command line, so the resolved content (script file or inline command,
+# either of which may itself contain quotes/`$`/etc.) never needs
+# host-side shell-escaping. Left un-caught by any `if`/`||` here so `set
+# -eu` propagates a non-zero exit straight out of this script -- matching
+# the PRD's "no automatic rollback" decision: the branch/worktree/VM
+# already created are left in place for manual diagnosis.
+if [ -n "$post_create_value" ] && { [ "$worktree_action" = "create" ] || [ "$worktree_action" = "attach" ]; }; then
+	post_create_content="$(sandbox_post_create_resolve "$post_create_value" "$repo_root" || true)"
+	echo "pj-sbx-spawn: running --post-create in the VM..."
+	{
+		printf 'cd /workspace\n'
+		printf '%s\n' "$post_create_content"
+	} | ssh "$instance_name" sh -s
+fi
 
 echo "pj-sbx-spawn: sandbox '$instance_name' is up (worktree: $worktree_path, ssh port: $ssh_port) -- run 'ssh $instance_name' or 'pj-sbx-ssh $task_name' to connect"
 if [ -n "$workspace_path" ]; then

@@ -15,7 +15,11 @@ ordered issue files that `pj-tdd` can pick up one at a time.
    exist, tell the user to run `pj-write-prd` first and stop.
 
 2. Explore the codebase so slices are grounded in what actually exists
-   (current structure, seams, what's already reusable).
+   (current structure, seams, what's already reusable). Use sub-agents
+   as needed to explore the codebase, but do not write any code or 
+   create any files during this skill. Make sure that you understand the 
+   codebase and you keep track of file paths and line numbers for any 
+   references you make to the user.
 
 3. Decompose the PRD into **vertical slices**: each issue should deliver
    one coherent, independently testable piece of user-visible behavior,
@@ -41,7 +45,9 @@ ordered issue files that `pj-tdd` can pick up one at a time.
 ## What to build
 
 A specific, scoped description of the slice, referencing which part(s) of
-the PRD's Solution/Implementation Decisions it comes from.
+the PRD's Solution/Implementation Decisions it comes from. Include any
+relevant code references (file paths, line numbers) to help the implementer find the
+right place to start.
 
 ## Acceptance criteria
 

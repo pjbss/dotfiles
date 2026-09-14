@@ -3,7 +3,8 @@
 #
 # Plain-shell tests for bin/pj-sbx-spawn's `--base <name>` validation
 # (issue 003), `--base list` (issue 004), `--ports <list>` validation
-# (issue 005), and `--help`/`-h` (issue 007): missing/unrecognized `--base`
+# (issue 005), `--help`/`-h` (issue 007, amended by issue 014 for
+# `--post-create`'s doc line): missing/unrecognized `--base`
 # or a non-numeric `--ports` value must all fail fast, before any git
 # branch/worktree/VM gets created, and `--base list` must enumerate
 # sandbox/templates/ live rather than a hardcoded name set. Actually
@@ -323,6 +324,11 @@ for help_flag in --help -h; do
 	case "$spawn_output" in
 	*"--ports"*) echo "PASS: pj-sbx-spawn $help_flag documents --ports" ;;
 	*) echo "FAIL: pj-sbx-spawn $help_flag documents --ports (got: $spawn_output)"; failures=$((failures + 1)) ;;
+	esac
+
+	case "$spawn_output" in
+	*"--post-create"*) echo "PASS: pj-sbx-spawn $help_flag documents --post-create" ;;
+	*) echo "FAIL: pj-sbx-spawn $help_flag documents --post-create (got: $spawn_output)"; failures=$((failures + 1)) ;;
 	esac
 
 	for expected_name in $(ls -1 "$DOTFILES_HOME/sandbox/templates"); do
