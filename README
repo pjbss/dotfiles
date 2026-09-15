@@ -20,6 +20,28 @@ apt, or dnf) to install missing external dependencies like `fzf`.
 
 `install.sh` is safe to re-run any time, e.g. after pulling changes.
 
+## Tests
+
+    $ make test          # every *_test.sh, one summary
+    $ make test PATTERN=ssh
+    $ make lint          # shell syntax check, plus shellcheck if installed
+
+`make test` is the contract, not an implementation detail: the Claude Code
+hooks and the autonomous issue loop both shell out to it, so anything they
+run against needs a `test` target and nothing else.
+
+Tests are plain shell -- no framework (`bats` isn't installed or declared
+anywhere here), just the assertion helpers in `test/assert.sh` and a `PASS:`/
+`FAIL:` line per check. `test/run.sh` discovers every `*_test.sh` under
+`sandbox/test/`, `zsh/modules/test/`, and `agents/test/` rather than listing
+them, so a new test file is picked up by dropping it in. Each file runs as its
+own subprocess, so shadowed `limactl`/`ssh` stubs and fixtures can't leak
+between them, and every file runs even after one fails.
+
+Separately, `dotfiles-test-install` builds a throwaway Docker container and
+runs `install.sh` inside it twice against a `$HOME` that only exists in the
+container -- never test install.sh against your real home directory.
+
 ## zsh
 
 ### Module loader
@@ -119,13 +141,144 @@ read-write, so an agent (Claude Code or GitHub Copilot CLI) can be given
 free rein without touching the host directly or ever seeing git push
 credentials.
 
+### Working a feature end to end
+
+The shape of a task: spawn a sandbox, plan inside it with you in the loop, let
+the agents implement the plan while you do something else, then review the
+result one commit at a time. Steps 3 and 5 are the ones with a human in them --
+everything else is mechanical.
+
+**1. Spawn a sandbox, from the repo you want to work on.**
+
+    $ cd ~/code/my-project
+    $ pj-sbx-spawn add-csv-export --base python3.12 --no-creds
+
+The task name becomes the branch, the worktree directory, the Lima VM, and the
+`ssh` host alias -- one name for the whole task. `--base list` shows the
+available provisioning templates; `--base none` is a bare VM. Use `--no-creds`
+for anything you plan to leave running unattended (see Containment below), and
+add `--ports 8000` if you need to reach a dev server from the host.
+
+First spawn of a repo takes a few minutes while the VM provisions. Later ones
+reuse the image.
+
+**2. Go in.**
+
+    $ pj-sbx-ssh add-csv-export
+
+You land in `/workspace`, which is the worktree, mounted read-write and shared
+with the host. Your shell is the same zsh as on the host. Or open the same
+sandbox in VS Code via Remote-SSH -- `pj-sbx-spawn` already wrote the host
+entry, and copied a `.code-workspace` file across if the repo has one.
+
+**3. Plan interactively.** Still inside the VM, run `claude` and work through:
+
+    /pj-clarify        # answers questions until the shape of the work is settled
+    /pj-write-prd      # writes issues/prd.md -- confirm the user stories
+    /pj-plan-issues    # decomposes it into issues/NNN-slug.md, dependency-ordered
+
+This is the part worth your attention. Everything downstream is only as good as
+the acceptance criteria written here, and they're much cheaper to fix now than
+after five commits have been built on them. Then sanity-check the result:
+
+    $ pj-issues validate    # sections present, blockers real, no cycles
+    $ pj-issues list        # what's ready, what's blocked on what
+    $ pj-issues graph       # the same thing as a Mermaid diagram
+
+Plan *inside* the VM so `issues/` is created directly in `/workspace`. It's
+gitignored working state, so `git worktree add` does not carry it across from
+the host -- if you planned on the host first, respawn with `--with-issues`.
+
+**4. Let it run.** Stay in the VM -- you're already there from step 3:
+
+    $ pj-run-issues --max-issues 1
+
+Start with one issue. Read that commit and its review before trusting the loop
+with the rest of the queue; if the acceptance criteria were vague, this is
+where you find out. Then let it drain:
+
+    $ pj-run-issues
+
+Per issue it implements test-first via `pj-tdd`, runs `make test`, commits via
+`pj-commit`, and reviews the commit with `pj-review` in a separate process. It
+stops at the first thing that isn't clean rather than building on top of it --
+a red suite, an issue `pj-tdd` left for a human, a missing commit, or a second
+`changes-requested`. Logs land in `issues/runs/<timestamp>/`.
+
+The project needs a `make test` target: that's the loop's only real check that
+the work works, and the `Stop` hook uses it to refuse to let a session finish
+while it's red.
+
+A full queue takes a while, so start it under `tmux` if you don't want to hold
+the ssh session open for it.
+
+**4a. Check what the run did, from the host.**
+
+    $ pj-sbx-verify add-csv-export
+
+The loop runs in the VM, but this check can't: the manifest it compares against
+lives outside the VM's mounts, and a guest with passwordless sudo is in no
+position to audit itself (see Containment). Run it inside the VM and it exits 1
+saying it has no manifest, rather than falsely reporting clean.
+`pj-sbx-teardown` runs the same check and refuses to tear down on a failure, so
+it can't be skipped entirely -- but you want to know before you queue up more
+work, not after.
+
+If you'd rather drive the whole thing from the host, `pj-sbx-run` pairs the two
+halves in one command:
+
+    $ pj-sbx-run add-csv-export --max-issues 1
+
+It verifies, dispatches that same `pj-run-issues` over ssh, and verifies again
+whatever the loop exits with. The tradeoff is the ssh session: lose it and the
+loop dies mid-issue, where `pj-run-issues` in the VM under tmux doesn't care.
+
+**5. Review and test by hand.** On the host, where the worktree also lives:
+
+    $ cd ~/.sandbox-worktrees/my-project/worktrees/add-csv-export
+    $ git log --oneline master..            # one commit per issue (or main..)
+    $ git show <sha>                        # review them one at a time
+    $ cat issues/reviews/001-*.md           # what the reviewer found
+    $ pj-issues status                      # what's done, what's left
+
+Run the app, click around, do the things automated tests don't cover. If
+something needs changing, go back into the sandbox and fix it there, or fix it
+on the host -- it's the same worktree either way.
+
+**6. Push, then tear down.**
+
+    $ git push -u origin add-csv-export     # from the host: sandboxes hold no push credentials
+    $ pj-sbx-teardown add-csv-export
+
+Teardown verifies the sandbox didn't write anywhere on the host it shouldn't
+have, and refuses if it did (see Containment). It deletes the VM but leaves the
+branch and worktree, so `pj-sbx-spawn add-csv-export` picks the task back up
+later with everything where you left it.
+
 ### Commands
 
-- `pj-sbx-spawn <task-name>` -- creates a new branch + worktree on the
-  host, boots a Lima VM with that worktree mounted read-write, and wires up
-  a VS Code Remote-SSH-ready `ssh <task-name>` entry. The VM comes up bare
-  aside from Docker, Node, and the Claude Code/Copilot CLIs (installed
-  unconditionally).
+- `pj-sbx-spawn <task-name> --base <name> [--ports <list>] [--post-create
+  <path-or-command>]` -- creates a new branch + worktree on the host, boots a
+  Lima VM with that worktree mounted read-write, and wires up a VS Code
+  Remote-SSH-ready `ssh <task-name>` entry. Every VM gets Docker, Node, the
+  Claude Code/GitHub Copilot CLIs, `gh`, and git-lfs unconditionally.
+
+  - `--base <name>` is **required** and single-valued: it names one of the
+    provisioning templates under `sandbox/templates/` (or
+    `local/sandbox/templates/`, which wins on a name collision). `--base none`
+    is the bare VM, made an explicit choice rather than a default.
+    `--base list` prints the valid names and exits.
+  - `--ports <comma-separated-list>` forwards each listed guest port to the
+    same host port when it's free, or to the first free port scanning upward
+    from it -- so the same project can run in several sandboxes at once
+    without their ports colliding. The mapping is printed once the VM is up.
+  - `--no-creds` withholds the host's `gh` token and the `~/.config/gh`,
+    `~/.aws` and `AWS_PROFILE` passthroughs -- what you want for a VM that
+    will run an unattended agent. See Containment below.
+  - `--post-create <path-or-command>` runs once per worktree, in the guest,
+    with `/workspace` as the working directory, after the guest bootstrap. If
+    the value names a file relative to the repo root it's read fresh and run
+    as a script; otherwise it runs verbatim as a shell command.
 - `pj-sbx-list` -- lists every sandbox this tooling knows about (task
   name, worktree path, running/stopped).
 - `pj-sbx-teardown <task-name>` -- stops and deletes the VM. The
@@ -134,6 +287,14 @@ credentials.
 - `pj-sbx-ssh <task-name>` -- connects to a running sandbox from a
   terminal, landing in `/workspace` (resolves the same task-name slug
   spawn/teardown use, then hands off to the system `ssh`).
+- `pj-sbx-verify <task-name>` -- re-checks that the sandbox hasn't written
+  anywhere on the host it shouldn't have. See Containment below.
+- `pj-sbx-run <task-name> [pj-run-issues args...]` -- host-side convenience
+  wrapper: verifies the sandbox, runs `pj-run-issues` inside it over ssh, and
+  verifies again however the loop exits. Equivalent to running `pj-run-issues`
+  in the VM yourself and `pj-sbx-verify` on the host afterwards, which is the
+  better shape when you're already inside the VM or the run is long enough to
+  outlive an ssh session.
 
 ### What's inside every sandbox
 
@@ -163,9 +324,106 @@ directories alone isn't enough. `pj-sbx-spawn` works around this:
       echo '<token from the command above>' > ~/.claude/sandbox-oauth-token
       chmod 600 ~/.claude/sandbox-oauth-token
 
-  Every sandbox from then on picks this up automatically, since that file
-  rides along on the already-mounted `~/.claude`. Without it, Claude Code
-  still works inside the VM, just via an interactive login the first time.
+  Every sandbox from then on picks this up automatically. Note the file is
+  read *on the host* at spawn time and forwarded into the VM as an
+  environment variable, the same way the `gh` token above is -- `~/.claude`
+  is deliberately not mounted into the guest, because almost everything under
+  it is runtime-writable and a read-only mount fails with EROFS the moment
+  Claude Code runs. Without the token file, Claude Code still works inside
+  the VM, just via an interactive login the first time.
+
+### Autonomous implementation loop
+
+How the machinery behind steps 3-5 above actually works.
+
+`pj-issues` makes the issue tree queryable -- `next`, `list`, `graph`,
+`validate`, `status`. The dependency graph was always there, as prose in each
+issue's `## Blocked by` section with "done" meaning the file had been moved into
+`issues/done/`; this executes that same rule instead of asking a person to hold
+it in their head. Nothing is cached: the filesystem stays the source of truth.
+
+`pj-run-issues` (run inside the VM, or dispatched into it by `pj-sbx-run`) then
+drains the ready queue. Per issue: implement it test-first via `pj-tdd`, run
+`make test`, commit it via `pj-commit`, then review it with `pj-review` in a
+**separate** `claude -p` process -- a reviewer sharing context with the author
+has already been told why every decision was right, and reliably agrees. A
+`changes-requested` verdict gets exactly one remediation pass before the loop
+stops for a human.
+
+It stops on the first thing that doesn't go cleanly rather than pressing on:
+a red suite, an issue `pj-tdd` left for a human, an issue that produced no
+commit, a leftover dirty tree, a second `changes-requested`. Everything lands
+in `issues/runs/<timestamp>/`.
+
+Two things make this safe enough to leave alone. `make test` is the gate -- the
+`Stop` hook refuses to let a session finish while it's red -- and the loop
+strips `GH_TOKEN`, `GITHUB_TOKEN` and every `AWS_*` variable from the
+environment it hands its children, even in a VM that was spawned with
+credentials. It refuses to run outside a sandbox at all without `--force`.
+
+`issues/` is gitignored working state, so it doesn't travel with
+`git worktree add`. Planning inside the VM sidesteps that; if you planned on
+the host first, `pj-sbx-spawn --with-issues` copies the tree across.
+
+The pieces are usable on their own: `pj-issues` works in any repo with an
+`issues/` tree, and `pj-run-issues` is the loop itself -- `pj-sbx-run` adds
+nothing to it but the integrity check on either side, which is host-only
+because the guest can't be trusted to audit itself.
+
+### Containment
+
+The VM is the blast radius, and it's worth being precise about what that does
+and doesn't mean.
+
+A spawned sandbox can write to exactly two host paths:
+
+- `/workspace` -- the task's worktree. That's the point.
+- The spawning repo's **real git directory**, mounted read-write at its
+  identical absolute host path. It has to be: a linked worktree's `.git` is a
+  file containing `gitdir: <that absolute path>/worktrees/<name>`, so without
+  the mount every git command inside `/workspace` fails outright, and it has to
+  be writable because commits made in the guest write objects and refs there.
+
+That second one is a host code-execution channel. A file planted in its
+`hooks/` runs **on the host, as you**, the next time any host-side git command
+touches the repo; `config` can reach the same outcome via `core.hooksPath`, a
+`filter.*.clean` command, or an `ext::` remote url. None of those files is
+touched by anything a sandbox legitimately does -- committing, branching,
+fetching and merging write only to `objects/` and `refs/`.
+
+So `pj-sbx-spawn` records a SHA-256 manifest of exactly those files, on the
+host, *before the VM boots*:
+
+    $ pj-sbx-verify <task-name>      # re-check at any time
+
+`pj-sbx-teardown` runs the same check first and **refuses to tear anything
+down** if it fails, leaving the VM, its SSH entry and its render artifact
+intact so there's still something to inspect (`--force` proceeds once you've
+looked). Object and ref growth is deliberately not covered -- that's the work
+the sandbox exists to do.
+
+The check lives on the host on purpose. The guest has passwordless `sudo` and
+Docker group membership, so any guard placed *inside* the VM can be removed by
+whatever is running in it.
+
+For an unattended agent, also withhold the credentials it doesn't need:
+
+    $ pj-sbx-spawn <task-name> --base none --no-creds
+
+That skips forwarding the host's `gh` auth token and drops the `~/.config/gh`,
+`~/.aws` and `AWS_PROFILE` passthroughs, leaving the VM able to read and write
+`/workspace` and little else. Claude Code's own token is still forwarded --
+without it the agent can't run. The reasoning is simply that a credential which
+was never forwarded can't be exfiltrated by a prompt injection sitting in the
+repo the agent was pointed at.
+
+**Residual risk, stated plainly.** This is a boundary against mistakes,
+runaway agents, and prompt injection -- not against an adversary who already
+controls what the model emits and is willing to spend effort. The guest is
+root in its own VM; the integrity check is detective, not preventive (it tells
+you something happened, after it happened); and the network is unrestricted, so
+anything the agent can read inside the VM it can also send somewhere. Don't put
+a secret in a sandbox you wouldn't be willing to leak.
 
 ### Requirements
 
