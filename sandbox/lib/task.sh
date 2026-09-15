@@ -209,7 +209,7 @@ sandbox_port_forwards_yaml() {
 	fi
 }
 
-# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH] [REPO_GITDIR] [BASE_TEMPLATE] [PORT_FORWARD_MAPPINGS] [BASE_MOUNTS]
+# sandbox_render_lima_config TEMPLATE SSH_PORT WORKTREE_PATH [AWS_PROFILE] [DOTFILES_PATH] [REPO_GITDIR] [BASE_TEMPLATE] [PORT_FORWARD_MAPPINGS] [BASE_MOUNTS] [BASE_PORT_FORWARDS] [CREDENTIAL_MOUNTS]
 #
 # Renders a per-task Lima YAML config to stdout: substitutes the SSH port,
 # worktree path, this dotfiles repo's own path, and the spawning repo's
@@ -268,6 +268,16 @@ sandbox_port_forwards_yaml() {
 # template can contribute rules (typically an `ignore: true` for a port
 # its own service listens on) independently of whether `--ports` was ever
 # passed.
+#
+# CREDENTIAL_MOUNTS is "no" to drop TEMPLATE's `~/.config/gh` and `~/.aws`
+# mounts, and anything else (including omitted) to keep them. "no" is what
+# pj-sbx-spawn's `--no-creds` passes, for a VM that will run an unattended
+# coding agent: such a run needs to read and write /workspace, and nothing
+# else. It has no business being able to push to arbitrary GitHub repos or
+# reach the user's cloud account, and a credential it never receives is one
+# that can't be exfiltrated by a prompt injection sitting in the repo it was
+# pointed at. Filtered out here rather than made a placeholder so the template
+# keeps stating the full, normal mount set in one readable place.
 sandbox_render_lima_config() {
 	template="$1"
 	ssh_port="$2"
@@ -279,6 +289,7 @@ sandbox_render_lima_config() {
 	port_forward_mappings="${8:-}"
 	base_mounts="${9:-}"
 	base_port_forwards="${10:-}"
+	credential_mounts="${11:-yes}"
 
 	port_forwards_file="$(mktemp)"
 	sandbox_port_forwards_yaml "$port_forward_mappings" "$base_port_forwards" > "$port_forwards_file"
@@ -306,6 +317,23 @@ sandbox_render_lima_config() {
 			else
 				sed -e "/^__SANDBOX_PORT_FORWARDS__\$/d"
 			fi
+		} | {
+			if [ "$credential_mounts" = no ]; then
+				# Drops each credential mount's whole list item: the
+				# `- location:` line plus every indented key under it, rather
+				# than a fixed line count, so adding a key to one of those
+				# mounts in the template can't silently leave an orphaned
+				# line behind.
+				awk '
+					skipping && /^  / { next }
+					{ skipping = 0 }
+					$0 == "- location: \"~/.config/gh\"" { skipping = 1; next }
+					$0 == "- location: \"~/.aws\"" { skipping = 1; next }
+					{ print }
+				'
+			else
+				cat
+			fi
 		}
 
 	rm -f "$port_forwards_file"
@@ -313,4 +341,80 @@ sandbox_render_lima_config() {
 	if [ -n "$aws_profile" ]; then
 		printf 'env:\n  AWS_PROFILE: "%s"\n' "$aws_profile"
 	fi
+}
+
+# sandbox_repo_gitdir REPO_ROOT
+#
+# Echoes the repo's real (common) git directory as an absolute path -- NOT
+# REPO_ROOT/.git. A linked worktree's `.git` is a *file* containing
+# `gitdir: <absolute host path>/worktrees/<name>`, so this is the directory the
+# VM must have mounted at that same absolute path for any git command inside a
+# spawned worktree to work at all (see lima-template.yaml).
+#
+# Resolved by `cd`-ing into whatever (possibly relative) path
+# `--git-common-dir` reports, rather than assuming "$REPO_ROOT/.git", so it
+# also works when REPO_ROOT is itself already a linked worktree of some other
+# repo.
+sandbox_repo_gitdir() {
+	(cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd)
+}
+
+# sandbox_repo_name REPO_GITDIR
+#
+# Echoes the *origin* repo's directory name, derived from the git directory's
+# parent rather than from the worktree's own basename. That distinction is the
+# whole point: run from inside one of this tool's own spawned worktrees (e.g.
+# ~/.sandbox-worktrees/fire/worktrees/wtools-781), `git rev-parse
+# --show-toplevel` returns that worktree's path, whose basename is the task
+# name ("wtools-781"), not the repo name ("fire") -- which resolved the wrong
+# sandbox_root entirely and made a real, already-existing sandbox report as not
+# found (confirmed directly). --git-common-dir always points at the original
+# repo's shared .git directory regardless of which worktree it's invoked from.
+sandbox_repo_name() {
+	basename "$(dirname "$1")"
+}
+
+# sandbox_root_for REPO_NAME
+#
+# Echoes the per-repo root under which this tooling keeps a repo's spawned
+# worktrees, rendered Lima configs, and integrity manifests.
+sandbox_root_for() {
+	echo "${SANDBOX_WORKTREE_ROOT:-$HOME/.sandbox-worktrees}/$1"
+}
+
+# sandbox_shell_quote VALUE
+#
+# Echoes VALUE wrapped in single quotes, with any embedded single quote
+# escaped, so the result is one shell word that evaluates back to VALUE
+# exactly -- including when VALUE is empty, which is the case this exists for.
+sandbox_shell_quote() {
+	printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# sandbox_guest_auth_preamble GH_TOKEN CLAUDE_TOKEN
+#
+# Echoes the two shell assignments that carry the host's forwarded credentials
+# into the guest bootstrap script, for prepending to that script on stdin.
+#
+# This exists because the tokens used to travel as positional arguments
+# (`ssh host sh -s -- "$gh_token" "$claude_token"`), and that silently
+# corrupted them. ssh does not preserve argument boundaries: it joins its
+# command argv into a single string and hands it to the remote login shell,
+# which re-splits it. An empty argument does not survive that round trip -- it
+# vanishes, and every argument after it shifts down one position.
+#
+# So with `--no-creds` (gh token deliberately empty, the documented setup for
+# an unattended agent), the guest received the *Claude* token as $1 and
+# nothing as $2. It exported the Anthropic OAuth token as GH_TOKEN/
+# GITHUB_TOKEN -- handing it to github.com on the next `gh` call -- and never
+# set CLAUDE_CODE_OAUTH_TOKEN at all, so Claude Code in a fresh VM had no
+# credential. The same shift fired without --no-creds whenever host `gh`
+# simply wasn't logged in.
+#
+# Passing the values as assignments on the script's own stdin sidesteps
+# argument splitting entirely, and keeps them off both machines' command
+# lines, where `ps` could read them.
+sandbox_guest_auth_preamble() {
+	printf 'gh_token_in=%s\n' "$(sandbox_shell_quote "${1:-}")"
+	printf 'claude_token_in=%s\n' "$(sandbox_shell_quote "${2:-}")"
 }

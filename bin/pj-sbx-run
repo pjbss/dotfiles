@@ -1,0 +1,81 @@
+#!/bin/sh
+# pj-sbx-run
+#
+# Runs the autonomous issue loop inside a spawned sandbox, from the host.
+#
+# Verifies the sandbox's git-directory integrity manifest before dispatching
+# and again after the loop exits (sandbox/lib/gitdir_guard.sh). The before
+# check refuses to hand more work to a VM that has already written somewhere it
+# shouldn't have; the after check is the one that matters, since it's the first
+# look at what this run actually did. Both run on the host, where the guest
+# cannot interfere with them.
+#
+# Everything after the task name is passed through to pj-run-issues, so see
+# `pj-run-issues --help` for --max-issues, --no-review and --dry-run.
+#
+# Usage: pj-sbx-run <task-name> [pj-run-issues args...] [--help|-h]
+#
+# Example:
+#   pj-sbx-spawn my-task --base none --no-creds
+#   pj-sbx-ssh my-task          # plan interactively: pj-clarify, pj-write-prd, pj-plan-issues
+#   pj-sbx-run my-task --max-issues 1
+#
+# The loop itself lives in the guest because that's where the work happens;
+# bin/ is already on the guest's PATH via the read-only dotfiles mount, so
+# there is nothing to install.
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+. "$DOTFILES_HOME/sandbox/lib/task.sh"
+
+task_name="${1:-}"
+if [ -z "$task_name" ]; then
+	printf '%sUsage:%s pj-sbx-run <task-name> [pj-run-issues args...]\n' "$C_BOLD" "$C_RESET" >&2
+	exit 1
+fi
+shift
+
+instance_name="$(sandbox_instance_name "$task_name")"
+
+verify() {
+	if "$BIN_DIR/pj-sbx-verify" "$task_name"; then
+		return 0
+	fi
+
+	printf "\n%spj-sbx-run: %s%s\n" "$C_RED" "$1" "$C_RESET" >&2
+	exit 1
+}
+
+verify "refusing to dispatch to a sandbox that already fails its integrity check (see above)."
+
+printf "%spj-sbx-run:%s dispatching the issue loop into '%s'...\n\n" "$C_CYAN" "$C_RESET" "$instance_name"
+
+# `|| loop_status=$?` rather than letting `set -e` abort: the post-run
+# integrity check is the most important thing this command does, and it has to
+# happen whether the loop succeeded, failed, or was interrupted.
+loop_status=0
+ssh -t "$instance_name" "cd /workspace && pj-run-issues $*" || loop_status=$?
+
+printf "\n%spj-sbx-run:%s loop exited %s -- re-checking git directory integrity\n" \
+	"$C_CYAN" "$C_RESET" "$loop_status"
+
+verify "the sandbox wrote to the host's git directory during this run (see above). Do not run any git command in this repo on the host until you have looked."
+
+exit "$loop_status"

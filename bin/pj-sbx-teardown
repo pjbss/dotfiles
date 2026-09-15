@@ -8,7 +8,16 @@
 # `pj-sbx-list` (issue 006) while the worktree/branch persist for
 # a future `pj-sbx-spawn` against the same task name.
 #
-# Usage: pj-sbx-teardown <task-name> [--help|-h]
+# Usage: pj-sbx-teardown <task-name> [--force] [--help|-h]
+#
+# Before touching the VM, the spawning repo's real git directory is checked
+# against the integrity manifest pj-sbx-spawn recorded before the VM booted
+# (sandbox/lib/gitdir_guard.sh). That directory is mounted into the guest
+# read-write, so a file planted in its `hooks/` runs on the *host* on the next
+# host-side git command. A failed check aborts teardown and leaves everything
+# exactly as it was -- nothing is stranded, the same command works again once
+# you've looked -- so the evidence is still there to inspect. `--force` tears
+# down anyway, for when you've inspected it and want the VM gone.
 
 set -eu
 
@@ -30,10 +39,20 @@ done
 
 . "$DOTFILES_HOME/sandbox/lib/task.sh"
 . "$DOTFILES_HOME/sandbox/lib/ssh_config.sh"
+. "$DOTFILES_HOME/sandbox/lib/gitdir_guard.sh"
 
-task_name="${1:-}"
+task_name=""
+force=""
+
+for arg in "$@"; do
+	case "$arg" in
+		--force) force=1 ;;
+		*) task_name="$arg" ;;
+	esac
+done
+
 if [ -z "$task_name" ]; then
-	echo "usage: pj-sbx-teardown <task-name>" >&2
+	echo "usage: pj-sbx-teardown <task-name> [--force]" >&2
 	exit 1
 fi
 
@@ -68,6 +87,33 @@ if [ ! -e "$vm_config" ]; then
 	exit 1
 fi
 
+# Checked before anything is stopped or deleted, so a sandbox that wrote
+# somewhere it shouldn't have is still fully intact to inspect. Aborting here
+# strands nothing: the VM, the SSH entry and the render artifact are all
+# exactly as they were, and re-running works once you're satisfied.
+gitdir_manifest="$sandbox_root/lima-configs/$instance_name.gitdir-manifest"
+
+if differences="$(sandbox_gitdir_verify "$repo_gitdir" "$gitdir_manifest")"; then
+	echo "pj-sbx-teardown: git directory integrity check passed"
+elif [ -n "$force" ]; then
+	echo "pj-sbx-teardown: git directory integrity check FAILED -- continuing anyway (--force):" >&2
+	printf '%s\n' "$differences" >&2
+else
+	{
+		printf '\npj-sbx-teardown: REFUSING TO TEAR DOWN -- git directory integrity check failed.\n\n'
+		printf 'The following changed in %s:\n\n' "$repo_gitdir"
+		printf '%s\n\n' "$differences"
+		printf 'Nothing a sandbox does legitimately writes these files. A file under\n'
+		printf 'hooks/ runs on this host on the next host-side git command, and config\n'
+		printf 'can do the same via core.hooksPath, filter.*.clean, or an ext:: remote.\n\n'
+		printf 'Nothing has been torn down -- inspect, then re-run with --force:\n'
+		printf '  ls -la %s/hooks\n' "$repo_gitdir"
+		printf '  git -C %s config --list --show-origin\n' "$repo_root"
+		printf '  pj-sbx-teardown %s --force\n\n' "$task_name"
+	} >&2
+	exit 1
+fi
+
 # `limactl list <name>` exits non-zero when Lima has no record of the
 # instance at all -- distinct from a real Stopped VM, which it reports
 # with exit 0. Guarding on this rather than unconditionally running
@@ -89,6 +135,6 @@ fi
 ssh_include_file="${SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/pj-sandbox-config}"
 sandbox_ssh_remove_entry "$ssh_include_file" "$instance_name"
 
-rm -f "$vm_config"
+rm -f "$vm_config" "$gitdir_manifest"
 
 echo "pj-sbx-teardown: sandbox '$instance_name' torn down -- worktree and branch left untouched"

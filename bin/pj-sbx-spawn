@@ -41,7 +41,7 @@
 # no matter how many times you reconnect (confirmed directly; see the
 # comment above the relevant block below for the full explanation).
 #
-# Usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>] [--help|-h]
+# Usage: pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>] [--no-creds] [--with-issues] [--help|-h]
 #
 # --base <name> is required and single-valued (no comma-separated/combined
 # templates): it selects one of the named provisioning templates under
@@ -62,6 +62,33 @@
 # sandboxes at once without their forwarded ports colliding. The resulting
 # host<->guest mapping is printed once the VM is up. Omitting `--ports`
 # leaves forwarding unchanged (SSH-only).
+#
+# --no-creds is optional, and is what you want for a VM that will run an
+# unattended coding agent: it withholds the host's `gh` auth token and drops
+# the `~/.config/gh`, `~/.aws` and `AWS_PROFILE` passthroughs, leaving the VM
+# able to read and write /workspace and nothing else. An autonomous run needs
+# no ability to push to arbitrary GitHub repos or reach the user's cloud
+# account, and a credential that was never forwarded can't be exfiltrated by a
+# prompt injection sitting in the repo the agent was pointed at. Claude Code's
+# own token is still forwarded -- without it the agent can't run at all.
+#
+# Separately, and regardless of any flag, an integrity manifest of the
+# spawning repo's real git directory is recorded on the host before the VM
+# boots (sandbox/lib/gitdir_guard.sh). That directory is mounted read-write, so
+# a file planted in its `hooks/` would run on the *host* on the next host-side
+# git command, and its `config` can achieve the same via core.hooksPath, a
+# filter.*.clean command, or an `ext::` remote url. `pj-sbx-verify` re-checks
+# the manifest, and pj-sbx-teardown does so automatically. The check lives on
+# the host precisely because the guest has passwordless sudo and could remove
+# any guard placed inside the VM.
+#
+# --with-issues is optional: it copies the source repo's `issues/` tree into a
+# newly created worktree. `issues/` is gitignored working state, so `git
+# worktree add` does not carry it across -- which is usually right (plan inside
+# the sandbox and it lands in /workspace directly), but is wrong when the
+# planning already happened on the host and the point of the spawn is to go
+# implement it. Only for create/attach, like --post-create: a resumed worktree
+# already has its own tree, and overwriting it would discard completed work.
 #
 # --post-create <path-or-command> is optional (see
 # issues/prd-post-create.md): if the value resolves to an existing file on
@@ -114,14 +141,25 @@ done
 . "$DOTFILES_HOME/sandbox/lib/worktree.sh"
 . "$DOTFILES_HOME/sandbox/lib/workspace.sh"
 . "$DOTFILES_HOME/sandbox/lib/post_create.sh"
+. "$DOTFILES_HOME/sandbox/lib/gitdir_guard.sh"
 
 task_name=""
 base_name=""
 ports_arg=""
 post_create_value=""
+no_creds=""
+with_issues=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
+		--no-creds)
+			no_creds=1
+			shift
+			;;
+		--with-issues)
+			with_issues=1
+			shift
+			;;
 		--base)
 			base_name="${2:-}"
 			shift 2
@@ -148,7 +186,7 @@ fi
 
 if [ -z "$task_name" ]; then
 	{
-		printf '%sUsage:%s pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>]\n\n' "$C_BOLD" "$C_RESET"
+		printf '%sUsage:%s pj-sbx-spawn <task-name> --base <name> [--ports <comma-separated-list>] [--post-create <path-or-command>] [--no-creds] [--with-issues]\n\n' "$C_BOLD" "$C_RESET"
 		sandbox_base_template_names_block "$templates_dir" "$local_templates_dir"
 	} >&2
 	exit 1
@@ -263,6 +301,15 @@ esac
 # already placed there if it happened to be tracked) so VS Code can be
 # opened against the sandboxed worktree directly. No-op, no output, if
 # the source repo has no such file.
+if [ -n "$with_issues" ] && [ "$worktree_action" != resume ]; then
+	if [ -d "$repo_root/issues" ]; then
+		echo "pj-sbx-spawn: copying the host's issues/ tree into the new worktree..."
+		cp -R "$repo_root/issues" "$worktree_path/"
+	else
+		echo "pj-sbx-spawn: --with-issues given, but $repo_root/issues doesn't exist -- nothing to copy"
+	fi
+fi
+
 workspace_path=""
 if workspace_source="$(sandbox_workspace_source_path "$repo_root")"; then
 	workspace_path="$(sandbox_workspace_write "$workspace_source" "$repo_root" "$worktree_path")"
@@ -286,19 +333,38 @@ combined_provision_path="$(mktemp)"
 [ -n "$base_provision_path" ] && cat "$base_provision_path" >> "$combined_provision_path"
 sandbox_base_template_files_provision_yaml "$base_files_manifest_path" >> "$combined_provision_path"
 
+if [ -n "$no_creds" ]; then
+	credential_mounts=no
+	aws_profile=""
+	echo "pj-sbx-spawn: --no-creds -- withholding gh/AWS credentials from this VM"
+else
+	credential_mounts=yes
+	aws_profile="${AWS_PROFILE:-}"
+fi
+
 sandbox_render_lima_config \
 	"$DOTFILES_HOME/sandbox/lima-template.yaml" \
 	"$ssh_port" \
 	"$worktree_path" \
-	"${AWS_PROFILE:-}" \
+	"$aws_profile" \
 	"$DOTFILES_HOME" \
 	"$repo_gitdir" \
 	"$combined_provision_path" \
 	"$port_mappings" \
 	"$base_mounts_path" \
-	"$base_port_forwards_path" > "$vm_config"
+	"$base_port_forwards_path" \
+	"$credential_mounts" > "$vm_config"
 
 rm -f "$combined_provision_path"
+
+# Recorded *before* limactl start, so the baseline is provably from a moment
+# the guest did not exist and therefore could not have influenced. Everything
+# git legitimately writes from inside the sandbox -- objects, refs -- is
+# deliberately outside what this covers; what it covers is the handful of files
+# in there that can make the *host* execute code (see gitdir_guard.sh).
+gitdir_manifest="$sandbox_root/lima-configs/$instance_name.gitdir-manifest"
+sandbox_gitdir_manifest_write "$repo_gitdir" "$gitdir_manifest"
+echo "pj-sbx-spawn: recorded git directory integrity manifest ($(grep -c . "$gitdir_manifest") files) -- check it any time with 'pj-sbx-verify $task_name'"
 
 echo "pj-sbx-spawn: starting Lima VM '$instance_name' (SSH port $ssh_port)..."
 limactl start --name "$instance_name" --tty=false "$vm_config"
@@ -323,12 +389,15 @@ sandbox_ssh_ensure_include "$ssh_include_file" "$ssh_config_file"
 # GITHUB_TOKEN in place of their own login) work without a fresh
 # device-flow login inside the VM -- both otherwise store their real
 # credential in the host's macOS Keychain, which the mounted ~/.config/gh
-# and ~/.copilot directories above can't carry into a Linux guest. Held in
-# a host shell variable only (never written to a file on the host) and
-# piped into the VM over stdin below, so it never appears in host `ps`
-# output, shell history, or the per-task Lima config on disk.
+# directory above can't carry into a Linux guest (~/.copilot isn't mounted
+# at all -- see lima-template.yaml). Held in a host shell variable only
+# (never written to a file on the host) and piped into the VM over stdin
+# below, so it never appears in `ps` output on either machine, shell
+# history, or the per-task Lima config on disk.
 gh_token=""
-if command -v gh >/dev/null 2>&1 && gh_token="$(gh auth token 2>/dev/null)" && [ -n "$gh_token" ]; then
+if [ -n "$no_creds" ]; then
+	echo "pj-sbx-spawn: --no-creds -- not forwarding a gh auth token"
+elif command -v gh >/dev/null 2>&1 && gh_token="$(gh auth token 2>/dev/null)" && [ -n "$gh_token" ]; then
 	echo "pj-sbx-spawn: forwarding the host's active 'gh' auth token into the VM for gh/Copilot CLI..."
 else
 	echo "pj-sbx-spawn: host 'gh' isn't authenticated -- gh/Copilot CLI will need a fresh login inside the VM"
@@ -378,19 +447,31 @@ fi
 # sh -c '...'` does not reliably forward piped stdin to the wrapped
 # command (it appears to swallow it as if typed at an interactive prompt
 # instead), where plain ssh does not have that problem. The gh and Claude
-# tokens travel as positional arguments (`sh -s -- "$gh_token"
-# "$claude_token"`, so they are available inside the script as $1/$2)
-# rather than over stdin, since stdin here is the script's own source
-# (`sh -s` reads its script from stdin) -- mixing a script's source and a
-# `read` command's input on the same stream is unreliable (confirmed
+# tokens reach the script as two shell assignments prepended to its own
+# source on stdin (sandbox_guest_auth_preamble), rather than as positional
+# arguments or via an embedded `read`.
+#
+# Not positional arguments, because ssh does not preserve argument
+# boundaries -- it joins its command argv into one string for the remote
+# login shell to re-split, so an empty argument vanishes and shifts every
+# later one down a slot. That isn't hypothetical: it's what `sh -s --
+# "$gh_token" "$claude_token"` did under --no-creds, where the gh token is
+# empty by design. The guest took the Claude token as $1, exported it as
+# GH_TOKEN/GITHUB_TOKEN (handing an Anthropic credential to github.com on
+# the next `gh` call), and never set CLAUDE_CODE_OAUTH_TOKEN at all.
+#
+# Not an embedded `read`, because stdin here is the script's own source
+# (`sh -s` reads its script from stdin), and mixing a script's source with
+# a `read` command's input on one stream is unreliable (confirmed
 # directly: a shell reading a piped script does not necessarily do so
 # strictly line-by-line, so an embedded `read` can end up consuming bytes
-# the interpreter itself still needed).
+# the interpreter itself still needed). Assignments in the source have
+# neither problem.
 echo "pj-sbx-spawn: bootstrapping dotfiles and forwarded auth inside the VM..."
-ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BOOTSTRAP'
+{
+	sandbox_guest_auth_preamble "$gh_token" "$claude_token"
+	cat <<-'PJSANDBOX_GUEST_BOOTSTRAP'
 	set -eu
-	gh_token_in="${1:-}"
-	claude_token_in="${2:-}"
 
 	if ! command -v zsh >/dev/null 2>&1; then
 		sudo apt-get update
@@ -417,6 +498,32 @@ ssh "$instance_name" sh -s -- "$gh_token" "$claude_token" <<-'PJSANDBOX_GUEST_BO
 	if command -v claude >/dev/null 2>&1 && ! claude mcp list 2>/dev/null | grep -q '^atlassian'; then
 		claude mcp add --transport http atlassian https://mcp.atlassian.com/v1/mcp/authv2 --scope user
 	fi
+
+	# A marker the guest-side hooks key off to know they're inside a sandbox
+	# and can therefore enforce the strict rules (no writes outside
+	# /workspace, no push, no sudo) that would be intolerable on a host
+	# machine. Deliberately not a security control -- anything with root in
+	# here can remove it, which is exactly why the real check
+	# (gitdir_guard.sh) runs on the host instead. It's a mode switch, and it
+	# needs to be one a hook can read with a single `[ -f ]`.
+	printf 'pj-sbx-spawn sandbox guest\n' | sudo tee /etc/pj-sandbox >/dev/null
+
+	# Guest-side git hardening. Neither of these is the real boundary -- the
+	# guest has passwordless sudo and can undo both -- so they sit alongside
+	# the host-side manifest check (gitdir_guard.sh), which it cannot. What
+	# they do buy is that an *accidental* path to host code execution stops
+	# being one click wide:
+	#
+	#   core.hooksPath      -> an empty directory, so guest git never executes
+	#                          a hook. Note a repo-level config setting still
+	#                          wins over this global one; that's exactly the
+	#                          change the host-side manifest is watching for.
+	#   protocol.ext.allow  -> never, so an `ext::<command>` remote url (a
+	#                          plain command-execution primitive dressed as a
+	#                          transport) can't be fetched from.
+	mkdir -p "$HOME/.config/git/empty-hooks"
+	git config --global core.hooksPath "$HOME/.config/git/empty-hooks"
+	git config --global protocol.ext.allow never
 
 	bash_login_file="$HOME/.profile"
 	[ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
@@ -473,6 +580,7 @@ json.dump(d, open(path, "w"), indent=2)
 		printf '\n# pj-sbx-spawn: hand off to zsh explicitly here, since chsh alone\n# never applies to this stale-ControlMaster VM session. Guarded by an\n# inherited marker, not just $ZSH_VERSION, so tools that source this same\n# profile to init a child shell (e.g. Claude Code'"'"'s own Bash tool) don'"'"'t\n# get hijacked into a terminal-less interactive zsh and hang.\nif [ -z "$ZSH_VERSION" ] && [ -z "$PJSANDBOX_ZSH_HANDED_OFF" ] && command -v zsh >/dev/null 2>&1; then\n\texport PJSANDBOX_ZSH_HANDED_OFF=1\n\texec zsh -l\nfi\n' >> "$bash_login_file"
 	fi
 	PJSANDBOX_GUEST_BOOTSTRAP
+} | ssh "$instance_name" sh -s
 unset gh_token claude_token
 
 # --post-create (issue 014, see issues/prd-post-create.md) runs in its own

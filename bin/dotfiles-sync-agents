@@ -26,8 +26,31 @@
 #     as-is -- except Copilot has no `tags` frontmatter field, so that line
 #     is dropped cleanly from the rendered copy.
 #
+#   - Claude Code: agents/claude-only/hooks/* -> ~/.claude/hooks/, copied and
+#     made executable. These are the scripts ~/.claude/settings.json's `hooks`
+#     entries point at.
+#   - Claude Code: agents/claude-only/commands/*.md -> ~/.claude/commands/.
+#   - Claude Code: agents/claude-only/settings.json -> merged into
+#     ~/.claude/settings.json. A *merge*, not a copy: that file is live
+#     user-owned state (it holds `model`, `tui`, and anything set via
+#     /config), so only the `hooks` key is replaced and every other key is left
+#     exactly as found. The file is backed up with a timestamped suffix the
+#     first time this rewrites it, same convention as install.sh's
+#     install_link. Note that this repo therefore *owns* the `hooks` key at
+#     the user level -- hand-edits there are overwritten on the next sync.
+#     Per-project hooks belong in a project's own .claude/settings.json, which
+#     this never touches.
+#
 # agents/claude-only/ has no Copilot equivalent -- the Copilot adapter skips
 # it entirely rather than attempt a lossy translation.
+#
+# Every destination directory is *pruned*: each one gets a `.dotfiles-managed`
+# manifest listing what this script put there, and on the next run anything
+# named in the old manifest but no longer present in source is removed. Without
+# it, deleting a skill, subagent or hook from this repo left the rendered copy
+# behind forever -- still discovered and still loaded by Claude Code, with no
+# source to explain it. Files this script never wrote are never touched, so a
+# hand-authored skill sitting alongside these is safe.
 
 SOURCE="${(%):-%x}"
 while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
@@ -44,6 +67,54 @@ CLAUDE_AGENTS_DST_DIR="$HOME/.claude/agents"
 
 WORKFLOWS_SRC_DIR="$DOTFILES_HOME/agents/claude-only/workflows"
 CLAUDE_WORKFLOWS_DST_DIR="$HOME/.claude/workflows"
+
+HOOKS_SRC_DIR="$DOTFILES_HOME/agents/claude-only/hooks"
+CLAUDE_HOOKS_DST_DIR="$HOME/.claude/hooks"
+
+COMMANDS_SRC_DIR="$DOTFILES_HOME/agents/claude-only/commands"
+CLAUDE_COMMANDS_DST_DIR="$HOME/.claude/commands"
+
+SETTINGS_SRC="$DOTFILES_HOME/agents/claude-only/settings.json"
+CLAUDE_SETTINGS_DST="$HOME/.claude/settings.json"
+
+MANIFEST_NAME=".dotfiles-managed"
+
+# prune_unmanaged DST_DIR RENDERED_NAMES...
+#
+# Removes anything this script previously rendered into DST_DIR that isn't in
+# RENDERED_NAMES any more, then records the new list. The manifest is what
+# makes pruning safe: without it the only way to clear stale output would be to
+# wipe the destination directory, which would take hand-authored skills and
+# agents sitting beside these with it.
+prune_unmanaged() {
+	dst_dir="$1"
+	shift
+
+	manifest="$dst_dir/$MANIFEST_NAME"
+
+	if [ -f "$manifest" ]; then
+		while IFS= read -r previous; do
+			[ -n "$previous" ] || continue
+
+			still_rendered=""
+			for name in "$@"; do
+				[ "$name" = "$previous" ] && still_rendered=1
+			done
+
+			if [ -z "$still_rendered" ] && [ -e "$dst_dir/$previous" ]; then
+				rm -rf "${dst_dir:?}/$previous"
+				echo "dotfiles-sync-agents: pruned $dst_dir/$previous (no longer in this repo)"
+			fi
+		done < "$manifest"
+	fi
+
+	if [ "$#" -gt 0 ]; then
+		mkdir -p "$dst_dir"
+		printf '%s\n' "$@" > "$manifest"
+	elif [ -f "$manifest" ]; then
+		rm -f "$manifest"
+	fi
+}
 
 sync_claude_skill() {
 	skill_dir="$1"
@@ -94,8 +165,75 @@ sync_skills_dir() {
 		[ -f "$skill_dir/SKILL.md" ] || continue
 		sync_claude_skill "$skill_dir"
 		sync_copilot_skill "$skill_dir"
+		rendered_skills+=("$(basename "$skill_dir")")
 	done
 }
+
+# sync_executable_file SRC_FILE DST_DIR
+#
+# Like sync_claude_only_file, but marks the result executable -- hook scripts
+# are exec'd by Claude Code directly, not sourced, so a copy that lost its mode
+# bit fails at the least convenient moment (mid-run, as a hook error) rather
+# than at sync time.
+sync_executable_file() {
+	sync_claude_only_file "$1" "$2"
+	chmod +x "$2/$(basename "$1")"
+}
+
+# sync_settings
+#
+# Merges this repo's `hooks` block into ~/.claude/settings.json, leaving every
+# other key untouched. Done with python3 rather than a copy because that file
+# is live state -- it already holds `model`, `tui`, and anything set through
+# /config -- and clobbering it would silently reset a user's whole
+# configuration to whatever this repo happened to ship.
+#
+# Backed up with a timestamped suffix before the first rewrite, matching
+# install.sh's install_link convention: nothing this repo installs ever
+# destroys an existing file without leaving a copy.
+sync_settings() {
+	[ -f "$SETTINGS_SRC" ] || return 0
+
+	mkdir -p "$(dirname "$CLAUDE_SETTINGS_DST")"
+
+	python3 - "$SETTINGS_SRC" "$CLAUDE_SETTINGS_DST" <<'PYEOF'
+import json, os, shutil, sys, time
+
+source_path, destination_path = sys.argv[1], sys.argv[2]
+
+with open(source_path) as handle:
+    managed = json.load(handle)
+
+existing = {}
+if os.path.exists(destination_path):
+    try:
+        with open(destination_path) as handle:
+            existing = json.load(handle)
+    except json.JSONDecodeError:
+        # Refuse to guess at a hand-broken settings file: overwriting it would
+        # lose whatever the user was mid-edit on.
+        sys.exit("dotfiles-sync-agents: %s is not valid JSON -- fix it, then re-run" % destination_path)
+
+if existing.get("hooks") == managed.get("hooks"):
+    print("dotfiles-sync-agents: %s hooks already current" % destination_path)
+    sys.exit(0)
+
+if os.path.exists(destination_path):
+    backup = "%s.dotfiles-backup.%s" % (destination_path, time.strftime("%Y%m%d%H%M%S"))
+    shutil.copy2(destination_path, backup)
+    print("dotfiles-sync-agents: backed up %s -> %s" % (destination_path, backup))
+
+existing["hooks"] = managed.get("hooks", {})
+
+with open(destination_path, "w") as handle:
+    json.dump(existing, handle, indent=2)
+    handle.write("\n")
+
+print("dotfiles-sync-agents: merged hooks into %s" % destination_path)
+PYEOF
+}
+
+rendered_skills=()
 
 if [ ! -d "$SKILLS_SRC_DIR" ]; then
 	echo "dotfiles-sync-agents: no skills found at $SKILLS_SRC_DIR" >&2
@@ -105,14 +243,49 @@ fi
 
 sync_skills_dir "$LOCAL_SKILLS_SRC_DIR"
 
+# Skills are pruned against both destinations, but from the one combined list:
+# a local skill shadowing a public one renders to the same name in both, so the
+# name is rendered exactly once either way.
+prune_unmanaged "$CLAUDE_SKILLS_DST_DIR" "${rendered_skills[@]}"
+prune_unmanaged "$COPILOT_SKILLS_DST_DIR" "${rendered_skills[@]}"
+
+rendered_subagents=()
 if [ -d "$SUBAGENTS_SRC_DIR" ]; then
 	for subagent_file in "$SUBAGENTS_SRC_DIR"/*.md(N); do
 		sync_claude_only_file "$subagent_file" "$CLAUDE_AGENTS_DST_DIR"
+		rendered_subagents+=("$(basename "$subagent_file")")
 	done
 fi
+prune_unmanaged "$CLAUDE_AGENTS_DST_DIR" "${rendered_subagents[@]}"
 
+rendered_workflows=()
 if [ -d "$WORKFLOWS_SRC_DIR" ]; then
 	for workflow_file in "$WORKFLOWS_SRC_DIR"/*.js(N); do
 		sync_claude_only_file "$workflow_file" "$CLAUDE_WORKFLOWS_DST_DIR"
+		rendered_workflows+=("$(basename "$workflow_file")")
 	done
 fi
+prune_unmanaged "$CLAUDE_WORKFLOWS_DST_DIR" "${rendered_workflows[@]}"
+
+rendered_hooks=()
+if [ -d "$HOOKS_SRC_DIR" ]; then
+	for hook_file in "$HOOKS_SRC_DIR"/*(N.); do
+		sync_executable_file "$hook_file" "$CLAUDE_HOOKS_DST_DIR"
+		rendered_hooks+=("$(basename "$hook_file")")
+	done
+fi
+prune_unmanaged "$CLAUDE_HOOKS_DST_DIR" "${rendered_hooks[@]}"
+
+rendered_commands=()
+if [ -d "$COMMANDS_SRC_DIR" ]; then
+	for command_file in "$COMMANDS_SRC_DIR"/*.md(N); do
+		sync_claude_only_file "$command_file" "$CLAUDE_COMMANDS_DST_DIR"
+		rendered_commands+=("$(basename "$command_file")")
+	done
+fi
+prune_unmanaged "$CLAUDE_COMMANDS_DST_DIR" "${rendered_commands[@]}"
+
+# Last, so the hook scripts the settings point at are already in place: a
+# settings file registering a hook whose script hasn't been written yet would
+# fail on the very next session start.
+sync_settings

@@ -1,0 +1,90 @@
+#!/bin/sh
+# pj-sbx-verify
+#
+# Checks that a sandbox hasn't written anywhere on the host it shouldn't have.
+#
+# A spawned VM can write to exactly two host paths: the task's worktree at
+# /workspace, which is the point, and the repo's real git directory, which is
+# mounted read-write only so git works inside that worktree. That second mount
+# is a host code-execution channel -- a file planted in its `hooks/` runs on
+# the host, as you, the next time any host-side git command touches the repo,
+# and its `config` can achieve the same thing via core.hooksPath, a
+# filter.*.clean command, or an `ext::` remote url.
+#
+# pj-sbx-spawn records a hash manifest of those files on the host before the VM
+# ever boots (sandbox/lib/gitdir_guard.sh). This re-derives it and reports any
+# difference. The check runs entirely on the host, so it holds even though the
+# guest has passwordless sudo and could disable any guard placed inside the VM.
+#
+# Objects and refs are deliberately not covered: commits, branches and merges
+# made inside the sandbox are the work it exists to do.
+#
+# Run it any time; pj-sbx-teardown and pj-sbx-run run it automatically.
+#
+# Usage: pj-sbx-verify <task-name> [--help|-h]
+#
+# Exits 0 and prints a one-line confirmation when nothing covered changed;
+# exits 1 listing each APPEARED/REMOVED/MODIFIED path otherwise.
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+. "$DOTFILES_HOME/sandbox/lib/task.sh"
+. "$DOTFILES_HOME/sandbox/lib/gitdir_guard.sh"
+
+task_name="${1:-}"
+
+if [ -z "$task_name" ]; then
+	printf '%sUsage:%s pj-sbx-verify <task-name>\n' "$C_BOLD" "$C_RESET" >&2
+	exit 1
+fi
+
+if ! git rev-parse --show-toplevel >/dev/null 2>&1; then
+	printf "%spj-sbx-verify:%s must be run from inside a git repository\n" "$C_RED" "$C_RESET" >&2
+	exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+repo_gitdir="$(sandbox_repo_gitdir "$repo_root")"
+repo_name="$(sandbox_repo_name "$repo_gitdir")"
+
+instance_name="$(sandbox_instance_name "$task_name")"
+sandbox_root="$(sandbox_root_for "$repo_name")"
+manifest_path="$sandbox_root/lima-configs/$instance_name.gitdir-manifest"
+
+if differences="$(sandbox_gitdir_verify "$repo_gitdir" "$manifest_path")"; then
+	printf "%spj-sbx-verify:%s '%s' is clean -- nothing outside objects/refs changed in %s\n" \
+		"$C_CYAN" "$C_RESET" "$instance_name" "$repo_gitdir"
+	exit 0
+fi
+
+{
+	printf "\n%s!! pj-sbx-verify: '%s' FAILED INTEGRITY CHECK !!%s\n\n" "$C_RED" "$instance_name" "$C_RESET"
+	printf 'The following changed inside %s:\n\n' "$repo_gitdir"
+	printf '%s\n\n' "$differences"
+	printf 'Nothing a sandbox does legitimately touches these files. Until you have\n'
+	printf 'inspected them, treat this repo as capable of running code on this host:\n'
+	printf 'a file under hooks/ runs on the next host-side git command, and config\n'
+	printf 'can do the same via core.hooksPath, filter.*.clean, or an ext:: remote.\n\n'
+	printf 'Inspect, then re-run teardown with --force once you are satisfied:\n'
+	printf '  ls -la %s/hooks\n' "$repo_gitdir"
+	printf '  git -C %s config --list --show-origin\n\n' "$repo_root"
+} >&2
+
+exit 1

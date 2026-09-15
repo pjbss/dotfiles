@@ -1,0 +1,182 @@
+#!/bin/sh
+# pj-issues
+#
+# Queries the local `issues/` tree that pj-plan-issues writes: what's ready to
+# work on, what's blocked on what, and whether the tree is internally
+# consistent. The dependency graph already existed -- as prose in each issue's
+# `## Blocked by` section, with "done" meaning the file had been moved into
+# `issues/done/` -- but nothing could read it, so draining the queue needed a
+# human to hold the whole graph in their head. This makes that same rule
+# executable, without introducing an index or state file that could drift out
+# of sync with the files themselves.
+#
+# `issues/` is gitignored working state by design, so everything here is
+# recomputed per call and nothing is written back.
+#
+# Usage: pj-issues [next|list|graph|validate|status] [--help|-h]
+#
+#   next      Path of the lowest-numbered ready issue; exits 1 if none is
+#             ready (the autonomous loop's "queue is empty" signal). Lowest
+#             number first, so the same tree always drains in the same order.
+#   list      Every issue with its state: ready, blocked (on NNN), or done.
+#   graph     The dependency graph as a Mermaid diagram.
+#   validate  Structural check: required sections present, blockers resolve to
+#             real files, no cycles, no duplicate numbers, nothing sitting in
+#             done/ with unchecked criteria. Exits non-zero on any problem.
+#   status    One-line summary, for a SessionStart hook to inject.
+#
+# Run from anywhere inside the repo; the issues directory is resolved relative
+# to the git worktree root (or $PWD outside a repo), not the current
+# directory. Override with $PJ_ISSUES_DIR.
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+. "$DOTFILES_HOME/agents/lib/issues.sh"
+
+if [ -n "${PJ_ISSUES_DIR:-}" ]; then
+	issues_dir="$PJ_ISSUES_DIR"
+elif repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+	issues_dir="$repo_root/issues"
+else
+	issues_dir="$PWD/issues"
+fi
+
+if [ ! -d "$issues_dir" ]; then
+	printf "%spj-issues:%s no issues directory at '%s' -- run pj-write-prd then pj-plan-issues first\n" \
+		"$C_RED" "$C_RESET" "$issues_dir" >&2
+	exit 1
+fi
+
+command_name="${1:-list}"
+
+case "$command_name" in
+	next)
+		pj_issues_next "$issues_dir"
+		;;
+
+	list)
+		open_issues="$(pj_issues_scan "$issues_dir")"
+		done_issues="$(pj_issues_scan_done "$issues_dir")"
+
+		if [ -z "$open_issues" ] && [ -z "$done_issues" ]; then
+			echo "no issues found in $issues_dir"
+			exit 0
+		fi
+
+		for issue_file in $open_issues; do
+			state="$(pj_issues_state "$issue_file" "$issues_dir")"
+			detail=""
+
+			if [ "$state" = blocked ]; then
+				for blocker in $(pj_issues_blockers "$issue_file"); do
+					[ -f "$issues_dir/done/$blocker" ] && continue
+					detail="$detail $(pj_issues_number "$blocker")"
+				done
+				detail=" (on$detail)"
+			fi
+
+			case "$state" in
+				ready) color="$C_CYAN" ;;
+				*) color="$C_YELLOW" ;;
+			esac
+
+			printf '%s%-8s%s %s%s\n' "$color" "$state" "$C_RESET" "$(basename "$issue_file")" "$detail"
+		done
+
+		for issue_file in $done_issues; do
+			printf '%-8s %s\n' done "$(basename "$issue_file")"
+		done
+		;;
+
+	graph)
+		echo 'graph TD'
+		for issue_file in $(pj_issues_scan "$issues_dir") $(pj_issues_scan_done "$issues_dir"); do
+			number="$(pj_issues_number "$issue_file")"
+			state="$(pj_issues_state "$issue_file" "$issues_dir")"
+
+			printf '  %s["%s<br/>%s"]\n' "$number" "$(basename "$issue_file")" "$state"
+
+			for blocker in $(pj_issues_blockers "$issue_file"); do
+				printf '  %s --> %s\n' "$(pj_issues_number "$blocker")" "$number"
+			done
+		done
+		;;
+
+	validate)
+		problems=0
+
+		for issue_file in $(pj_issues_scan "$issues_dir") $(pj_issues_scan_done "$issues_dir"); do
+			if ! pj_issues_validate_file "$issue_file" "$issues_dir"; then
+				problems=$((problems + 1))
+			fi
+		done
+
+		# Duplicate numbers are worth calling out on their own: pj-plan-issues
+		# is told never to reuse one, and two issues sharing a number makes
+		# every "Blocked by issues/NNN-..." reference ambiguous.
+		duplicates="$(
+			for issue_file in $(pj_issues_scan "$issues_dir") $(pj_issues_scan_done "$issues_dir"); do
+				pj_issues_number "$issue_file"
+			done | sort | uniq -d
+		)"
+		for number in $duplicates; do
+			echo "duplicate issue number $number"
+			problems=$((problems + 1))
+		done
+
+		for name in $(pj_issues_find_cycle "$issues_dir"); do
+			echo "$name: in a dependency cycle -- it can never become ready"
+			problems=$((problems + 1))
+		done
+
+		if [ "$problems" -ne 0 ]; then
+			printf '%s%s problem(s)%s\n' "$C_RED" "$problems" "$C_RESET" >&2
+			exit 1
+		fi
+
+		echo "issues: ok"
+		;;
+
+	status)
+		ready=0
+		blocked=0
+
+		for issue_file in $(pj_issues_scan "$issues_dir"); do
+			case "$(pj_issues_state "$issue_file" "$issues_dir")" in
+				ready) ready=$((ready + 1)) ;;
+				blocked) blocked=$((blocked + 1)) ;;
+			esac
+		done
+
+		completed="$(pj_issues_scan_done "$issues_dir" | grep -c . || true)"
+
+		echo "issues: $ready ready, $blocked blocked, $completed done"
+
+		if next_issue="$(pj_issues_next "$issues_dir")"; then
+			echo "next up: $(basename "$next_issue")"
+		fi
+		;;
+
+	*)
+		printf "%spj-issues:%s unknown command '%s'\n\n" "$C_RED" "$C_RESET" "$command_name" >&2
+		printf 'Usage: pj-issues [next|list|graph|validate|status]\n' >&2
+		exit 1
+		;;
+esac

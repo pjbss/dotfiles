@@ -1,0 +1,318 @@
+#!/bin/sh
+# pj-run-issues
+#
+# Drains the ready queue in `issues/`: for each unblocked issue, implement it
+# test-first, run the suite, commit, then review it in a fresh context before
+# moving on. Stops on the first thing that doesn't go cleanly, rather than
+# pressing on and burying the failure under later work.
+#
+# One commit per issue is the point of the whole arrangement -- it's what makes
+# an unattended run reviewable afterwards one issue at a time, instead of
+# arriving as a single undifferentiated branch.
+#
+# The review runs as a separate `claude -p` process, not a subagent of the
+# implementing session. A reviewer that shares context with the author has
+# already been told why every decision was right, and reliably agrees.
+#
+# Usage: pj-run-issues [--max-issues N] [--no-review] [--dry-run] [--force] [--help|-h]
+#
+#   --max-issues N  Stop after N issues (default: drain the queue).
+#   --no-review     Skip the review pass. For a first smoke test only.
+#   --dry-run       Print the plan -- which issues, in what order -- and exit
+#                   without invoking anything.
+#   --force         Run outside a sandbox. See below; you almost certainly
+#                   don't want this.
+#
+# Refuses to run outside a spawned sandbox unless --force. This is an
+# unattended agent with --dangerously-skip-permissions: the VM is what makes
+# that a reasonable thing to do rather than a reckless one.
+#
+# Strips GH_TOKEN, GITHUB_TOKEN and every AWS_* variable from the environment
+# it hands to its children, even in a VM spawned without --no-creds. An
+# autonomous coding run needs to read and write the worktree; it does not need
+# to be able to push to arbitrary repositories or reach a cloud account, and a
+# credential that isn't in the environment can't be exfiltrated by a prompt
+# injection sitting in the repo it was pointed at.
+#
+# Sets PJ_STOP_TESTS=1, which arms the Stop hook: a session cannot finish while
+# `make test` is red.
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+
+for arg in "$@"; do
+	case "$arg" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+	esac
+done
+
+max_issues=""
+review=1
+dry_run=""
+force=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--max-issues) max_issues="${2:-}"; shift 2 ;;
+		--no-review) review=""; shift ;;
+		--dry-run) dry_run=1; shift ;;
+		--force) force=1; shift ;;
+		*)
+			printf "%spj-run-issues:%s unknown argument '%s'\n" "$C_RED" "$C_RESET" "$1" >&2
+			exit 1
+			;;
+	esac
+done
+
+fail() {
+	printf "%spj-run-issues:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
+	exit 1
+}
+
+say() {
+	printf "%spj-run-issues:%s %s\n" "$C_CYAN" "$C_RESET" "$1"
+}
+
+if [ ! -f "${PJ_SANDBOX_MARKER:-/etc/pj-sandbox}" ] && [ -z "$force" ]; then
+	fail "not inside a sandbox. This runs a coding agent unattended with permissions disabled -- the VM is what makes that reasonable. Spawn one with 'pj-sbx-spawn <task> --base <name> --no-creds' and run it there, or pass --force if you genuinely mean to do this on this machine."
+fi
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || fail "must be run from inside a git repository"
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+[ -d issues ] || fail "no issues/ directory -- plan the work first with pj-write-prd and pj-plan-issues"
+[ -f Makefile ] || fail "no Makefile -- this loop uses 'make test' as its gate, so the project needs a test target"
+grep -q '^test:' Makefile || fail "the Makefile has no 'test' target -- that target is this loop's only check that the work actually works"
+command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
+
+"$BIN_DIR/pj-issues" validate >/dev/null || fail "the issue tree doesn't validate -- run 'pj-issues validate' and fix it before starting an unattended run"
+
+if [ -n "$(git status --porcelain)" ]; then
+	fail "the working tree is dirty. Each issue has to become exactly one reviewable commit, which isn't possible on top of uncommitted changes -- commit or stash them first."
+fi
+
+# --- dry run ---------------------------------------------------------------
+
+if [ -n "$dry_run" ]; then
+	say "would drain the following, in this order:"
+	"$BIN_DIR/pj-issues" list
+	exit 0
+fi
+
+# --- run setup -------------------------------------------------------------
+
+run_id="$(date +%Y%m%d-%H%M%S)"
+run_dir="issues/runs/$run_id"
+mkdir -p "$run_dir"
+run_log="$run_dir/run.log"
+
+log() {
+	printf '[%s] %s\n' "$(date +%H:%M:%S)" "$1" >> "$run_log"
+}
+
+say "run $run_id -- logging to $run_dir"
+log "started in $repo_root"
+
+# run_claude PROMPT LOGFILE
+#
+# One headless Claude Code invocation, streamed to the terminal and appended to
+# LOGFILE. Returns claude's own exit status.
+#
+# Getting that status takes the `echo $? > status_file` dance because output is
+# piped through tee, and a POSIX pipeline's status is the *last* command's --
+# so a plain `claude ... | tee` would report tee's success no matter how badly
+# claude failed. The alternative, buffering to a file and printing it
+# afterwards, would cost the live progress that makes a long unattended run
+# watchable.
+#
+# Credentials are stripped here rather than once at the top so it stays true
+# however the loop was invoked, and with `env -u` rather than `unset` so the
+# parent shell keeps its own environment.
+run_claude() {
+	prompt="$1"
+	logfile="$2"
+
+	claude_status_file="$(mktemp)"
+
+	{
+		env -u GH_TOKEN -u GITHUB_TOKEN \
+			-u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+			-u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
+			PJ_STOP_TESTS=1 \
+			claude -p "$prompt" \
+			--dangerously-skip-permissions \
+			${PJ_CLAUDE_ARGS:-} 2>&1
+		echo $? > "$claude_status_file"
+	} | tee -a "$logfile"
+
+	# Empty when claude was killed outright (SIGKILL, or the VM going away)
+	# before it could write its status -- treat that as a failure rather than
+	# letting `return ""` become a shell error the caller can't interpret.
+	claude_status="$(cat "$claude_status_file" 2>/dev/null || true)"
+	rm -f "$claude_status_file"
+	[ -n "$claude_status" ] || claude_status=1
+
+	return "$claude_status"
+}
+
+completed=0
+
+while :; do
+	if [ -n "$max_issues" ] && [ "$completed" -ge "$max_issues" ]; then
+		say "reached --max-issues $max_issues"
+		log "stopping: reached --max-issues $max_issues"
+		break
+	fi
+
+	if ! issue_path="$("$BIN_DIR/pj-issues" next)"; then
+		say "queue drained -- nothing left that isn't blocked"
+		log "queue drained"
+		break
+	fi
+
+	issue_name="$(basename "$issue_path")"
+	issue_slug="${issue_name%.md}"
+	issue_log="$run_dir/$issue_slug.log"
+
+	say "implementing $issue_name"
+	log "implementing $issue_name"
+
+	commit_before="$(git rev-parse HEAD)"
+
+	run_claude "Use the pj-tdd skill to implement exactly this one issue: $issue_path
+
+Follow that skill's procedure literally, including the red-green-refactor loop
+and its rules about stopping rather than expanding scope. When the issue is
+fully complete, use the pj-commit skill to make exactly one commit for it.
+
+Do not start any other issue. Do not push." "$issue_log" || {
+		say "claude exited non-zero while implementing $issue_name -- stopping"
+		log "stopped: claude failed on $issue_name"
+		break
+	}
+
+	# pj-tdd deliberately leaves an issue in issues/ when some acceptance
+	# criterion needs a human. Detecting that here is what stops the loop
+	# picking the same issue up again forever.
+	if [ -f "$issue_path" ]; then
+		say "$issue_name is still in issues/ -- pj-tdd left it for a human (see its Notes section)"
+		log "stopped: $issue_name not completed, left in issues/"
+		break
+	fi
+
+	if ! make test >> "$issue_log" 2>&1; then
+		say "make test is failing after $issue_name -- stopping"
+		log "stopped: make test failed after $issue_name"
+		break
+	fi
+
+	commit_after="$(git rev-parse HEAD)"
+	if [ "$commit_before" = "$commit_after" ]; then
+		say "$issue_name produced no commit -- stopping rather than folding it into the next issue's"
+		log "stopped: no commit produced for $issue_name"
+		break
+	fi
+
+	if [ -n "$(git status --porcelain)" ]; then
+		say "uncommitted changes left over after $issue_name -- stopping"
+		log "stopped: dirty tree after $issue_name"
+		break
+	fi
+
+	completed=$((completed + 1))
+	say "committed $issue_name as $(git rev-parse --short HEAD)"
+	log "committed $issue_name as $commit_after"
+
+	[ -n "$review" ] || continue
+
+	# --- review, in a context that didn't write the code -------------------
+
+	verdict_file="issues/reviews/$issue_slug.md"
+	attempt=1
+
+	while :; do
+		say "reviewing $issue_name (attempt $attempt)"
+		rm -f "$verdict_file"
+
+		run_claude "Use the pj-review skill to review the implementation of
+issues/done/$issue_name, as committed in $commit_before..$(git rev-parse HEAD).
+
+Write your verdict to $verdict_file. Review only; do not change any code." \
+			"$run_dir/$issue_slug.review.log" || {
+			say "claude exited non-zero while reviewing $issue_name -- stopping"
+			log "stopped: claude failed reviewing $issue_name"
+			exit 1
+		}
+
+		if [ ! -f "$verdict_file" ]; then
+			say "the review produced no verdict file -- stopping"
+			log "stopped: no verdict file for $issue_name"
+			exit 1
+		fi
+
+		verdict="$(head -1 "$verdict_file")"
+		log "review verdict for $issue_name: $verdict"
+
+		case "$verdict" in
+			"Verdict: approved")
+				say "approved"
+				break
+				;;
+			"Verdict: changes-requested")
+				if [ "$attempt" -ge 2 ]; then
+					say "still changes-requested after a remediation pass -- stopping for a human"
+					log "stopped: $issue_name unresolved after remediation"
+					# Back out of done/ so the queue reflects reality: this
+					# issue is not finished, and a later run must not skip it.
+					mkdir -p issues
+					mv "issues/done/$issue_name" "issues/$issue_name"
+					exit 1
+				fi
+
+				say "changes requested -- one remediation pass"
+				log "remediating $issue_name"
+
+				run_claude "The review in $verdict_file requested changes to your
+implementation of issues/done/$issue_name. Read it, address every finding, keep
+'make test' green, and amend your existing commit (do not add a second commit
+for the same issue). Do not push." "$run_dir/$issue_slug.remediate.log" || {
+					say "claude exited non-zero while remediating $issue_name -- stopping"
+					log "stopped: claude failed remediating $issue_name"
+					exit 1
+				}
+
+				if ! make test >> "$issue_log" 2>&1; then
+					say "make test is failing after remediation -- stopping"
+					log "stopped: make test failed after remediating $issue_name"
+					exit 1
+				fi
+
+				attempt=$((attempt + 1))
+				;;
+			*)
+				say "unrecognized verdict line '$verdict' in $verdict_file -- stopping"
+				log "stopped: unrecognized verdict for $issue_name"
+				exit 1
+				;;
+		esac
+	done
+done
+
+say "done -- $completed issue(s) completed this run"
+log "finished: $completed issue(s)"
+
+echo
+"$BIN_DIR/pj-issues" status
+echo
+say "review the branch one commit at a time: git log --oneline $(git rev-parse --short HEAD)"
