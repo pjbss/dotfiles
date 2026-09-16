@@ -92,8 +92,28 @@ run_sbx_run some-task --max-issues 2
 assert_exit_code 0 "$rc" "a clean run exits 0"
 invocation="$(cat "$fixture_root/ssh-invocation")"
 assert_contains "$invocation" "some-task" "ssh is pointed at the slug spawn wrote a Host entry for"
-assert_contains "$invocation" "cd /workspace" "the remote command lands in /workspace"
+assert_contains "$invocation" "cd '/workspace'" "the remote command lands in /workspace by default"
 assert_contains "$invocation" "pj-run-issues --max-issues 2" "arguments are passed through to pj-run-issues"
+
+# --- --project-dir ---
+
+# pj-run-issues takes the directory it's run from as the project, so a monorepo
+# package with its own issues/ is only reachable from the host if this can aim
+# the ssh command somewhere other than the worktree root.
+run_sbx_run some-task --project-dir app --max-issues 2
+assert_exit_code 0 "$rc" "--project-dir runs"
+invocation="$(cat "$fixture_root/ssh-invocation")"
+assert_contains "$invocation" "cd '/workspace/app'" "a relative --project-dir is resolved under /workspace"
+assert_contains "$invocation" "pj-run-issues --max-issues 2" "the remaining arguments still reach pj-run-issues"
+assert_not_contains "$invocation" "--project-dir" "--project-dir is consumed here, not passed on to a command that would reject it"
+
+run_sbx_run some-task --project-dir /elsewhere
+invocation="$(cat "$fixture_root/ssh-invocation")"
+assert_contains "$invocation" "cd '/elsewhere'" "an absolute --project-dir is used as given"
+
+run_sbx_run some-task --project-dir
+assert_exit_code 1 "$rc" "--project-dir with no value is refused"
+assert_contains "$out" "needs a directory" "the refusal says what --project-dir wants"
 
 # --- the loop's exit status is preserved ---
 

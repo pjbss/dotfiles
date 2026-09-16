@@ -209,6 +209,19 @@ The project needs a `make test` target: that's the loop's only real check that
 the work works, and the `Stop` hook uses it to refuse to let a session finish
 while it's red.
 
+The project is wherever you run the loop from, not the git root -- in a
+monorepo those aren't the same thing, and the repo root has neither this
+project's issues nor its tests. The `make test` gate doesn't have to be in that
+same directory: issues and the PRD sit at the project root because that's where
+the paths written in them resolve, while the Makefile may belong to one
+subproject further down. It's found automatically when there's exactly one
+candidate, and otherwise you name it:
+
+    $ pj-run-issues --test-dir sparkwatch/backend
+
+Refusing to guess between several is deliberate -- gating an unattended run on
+a suite that never sees the code it wrote is the same as not gating it at all.
+
 A full queue takes a while, so start it under `tmux` if you don't want to hold
 the ssh session open for it.
 
@@ -230,7 +243,8 @@ halves in one command:
     $ pj-sbx-run add-csv-export --max-issues 1
 
 It verifies, dispatches that same `pj-run-issues` over ssh, and verifies again
-whatever the loop exits with. The tradeoff is the ssh session: lose it and the
+whatever the loop exits with. It lands in `/workspace`; add `--project-dir` if
+the project is a subdirectory of the worktree. The tradeoff is the ssh session: lose it and the
 loop dies mid-issue, where `pj-run-issues` in the VM under tmux doesn't care.
 
 **5. Review and test by hand.** On the host, where the worktree also lives:
@@ -289,9 +303,12 @@ later with everything where you left it.
   spawn/teardown use, then hands off to the system `ssh`).
 - `pj-sbx-verify <task-name>` -- re-checks that the sandbox hasn't written
   anywhere on the host it shouldn't have. See Containment below.
-- `pj-sbx-run <task-name> [pj-run-issues args...]` -- host-side convenience
-  wrapper: verifies the sandbox, runs `pj-run-issues` inside it over ssh, and
-  verifies again however the loop exits. Equivalent to running `pj-run-issues`
+- `pj-sbx-run <task-name> [--project-dir DIR] [pj-run-issues args...]` --
+  host-side convenience wrapper: verifies the sandbox, runs `pj-run-issues`
+  inside it over ssh, and verifies again however the loop exits.
+  `--project-dir` (default `/workspace`) is consumed here rather than passed
+  on, and says where in the guest the loop runs.
+  Equivalent to running `pj-run-issues`
   in the VM yourself and `pj-sbx-verify` on the host afterwards, which is the
   better shape when you're already inside the VM or the run is long enough to
   outlive an ssh session.
@@ -360,6 +377,13 @@ Two things make this safe enough to leave alone. `make test` is the gate -- the
 strips `GH_TOKEN`, `GITHUB_TOKEN` and every `AWS_*` variable from the
 environment it hands its children, even in a VM that was spawned with
 credentials. It refuses to run outside a sandbox at all without `--force`.
+
+The gate has to actually be pointed at something for any of that to hold. The
+loop resolves the suite once -- the project root's own `make test` target, a
+single one found below it, or the one `--test-dir` names -- and passes it to
+its children as `PJ_TEST_DIR`, which is what the `Stop` hook gates on. Without
+that the hook would look in the agent's own working directory, find no Makefile
+there in a monorepo, and skip: an unattended run with nothing checking it.
 
 `issues/` is gitignored working state, so it doesn't travel with
 `git worktree add`. Planning inside the VM sidesteps that; if you planned on

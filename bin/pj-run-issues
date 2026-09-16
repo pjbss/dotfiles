@@ -14,14 +14,30 @@
 # implementing session. A reviewer that shares context with the author has
 # already been told why every decision was right, and reliably agrees.
 #
-# Usage: pj-run-issues [--max-issues N] [--no-review] [--dry-run] [--force] [--help|-h]
+# Usage: pj-run-issues [--max-issues N] [--test-dir DIR] [--no-review]
+#                      [--dry-run] [--force] [--help|-h]
 #
 #   --max-issues N  Stop after N issues (default: drain the queue).
+#   --test-dir DIR  Directory holding the Makefile whose `test` target gates
+#                   the run (default: discovered, see below).
 #   --no-review     Skip the review pass. For a first smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
 #   --force         Run outside a sandbox. See below; you almost certainly
 #                   don't want this.
+#
+# The project is the directory this is run from, not the enclosing git
+# repository's root. In a monorepo those aren't the same thing, and the repo
+# root is the wrong answer: it holds neither this project's issues nor its
+# tests. `issues/` has to be in that directory.
+#
+# The `make test` gate doesn't have to be in the same directory. Issues and the
+# PRD live at the project root because that's where the paths written inside
+# them resolve, while in a monorepo the Makefile belongs to one subproject
+# further down. Without --test-dir, the project root is used when it has a
+# `test` target, and otherwise the tree below it is searched -- finding several
+# is refused rather than guessed at, since picking the wrong suite would mean
+# an unattended run gated on tests that never touch the code it wrote.
 #
 # Refuses to run outside a spawned sandbox unless --force. This is an
 # unattended agent with --dangerously-skip-permissions: the VM is what makes
@@ -35,7 +51,9 @@
 # injection sitting in the repo it was pointed at.
 #
 # Sets PJ_STOP_TESTS=1, which arms the Stop hook: a session cannot finish while
-# `make test` is red.
+# `make test` is red, and PJ_TEST_DIR so that hook gates on the same suite this
+# loop does -- the agent's own working directory is the project root, which in
+# a monorepo has no Makefile, and the hook skips silently when it finds none.
 
 set -eu
 
@@ -56,24 +74,6 @@ for arg in "$@"; do
 	esac
 done
 
-max_issues=""
-review=1
-dry_run=""
-force=""
-
-while [ $# -gt 0 ]; do
-	case "$1" in
-		--max-issues) max_issues="${2:-}"; shift 2 ;;
-		--no-review) review=""; shift ;;
-		--dry-run) dry_run=1; shift ;;
-		--force) force=1; shift ;;
-		*)
-			printf "%spj-run-issues:%s unknown argument '%s'\n" "$C_RED" "$C_RESET" "$1" >&2
-			exit 1
-			;;
-	esac
-done
-
 fail() {
 	printf "%spj-run-issues:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
 	exit 1
@@ -83,18 +83,102 @@ say() {
 	printf "%spj-run-issues:%s %s\n" "$C_CYAN" "$C_RESET" "$1"
 }
 
+max_issues=""
+test_dir=""
+review=1
+dry_run=""
+force=""
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--max-issues)
+			[ $# -ge 2 ] || fail "--max-issues needs a number"
+			max_issues="$2"; shift 2 ;;
+		--test-dir)
+			[ $# -ge 2 ] || fail "--test-dir needs a directory"
+			test_dir="$2"; shift 2 ;;
+		--no-review) review=""; shift ;;
+		--dry-run) dry_run=1; shift ;;
+		--force) force=1; shift ;;
+		*)
+			fail "unknown argument '$1'"
+			;;
+	esac
+done
+
 if [ ! -f "${PJ_SANDBOX_MARKER:-/etc/pj-sandbox}" ] && [ -z "$force" ]; then
 	fail "not inside a sandbox. This runs a coding agent unattended with permissions disabled -- the VM is what makes that reasonable. Spawn one with 'pj-sbx-spawn <task> --base <name> --no-creds' and run it there, or pass --force if you genuinely mean to do this on this machine."
 fi
 
 git rev-parse --show-toplevel >/dev/null 2>&1 || fail "must be run from inside a git repository"
-repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
+project_root="$PWD"
 
-[ -d issues ] || fail "no issues/ directory -- plan the work first with pj-write-prd and pj-plan-issues"
-[ -f Makefile ] || fail "no Makefile -- this loop uses 'make test' as its gate, so the project needs a test target"
-grep -q '^test:' Makefile || fail "the Makefile has no 'test' target -- that target is this loop's only check that the work actually works"
+[ -d issues ] || fail "no issues/ directory in $project_root -- this loop takes the directory you run it from as the project, not the repository root, so cd to wherever issues/ lives. If the work isn't planned yet, start with pj-write-prd and pj-plan-issues."
 command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
+
+# --- where the `make test` gate lives ---------------------------------------
+
+# True when DIR holds a Makefile declaring a `test` target.
+has_test_target() {
+	[ -f "$1/Makefile" ] && grep -q '^test:' "$1/Makefile"
+}
+
+if [ -n "$test_dir" ]; then
+	[ -d "$test_dir" ] || fail "--test-dir '$test_dir' is not a directory"
+	has_test_target "$test_dir" || fail "--test-dir '$test_dir' has no Makefile with a 'test' target -- that target is this loop's only check that the work actually works"
+elif has_test_target .; then
+	test_dir="."
+else
+	# Depth-limited, and pruning the directories that are full of vendored
+	# Makefiles nobody means, so that on a large monorepo this stays a
+	# moment's work and the candidates it reports back are all plausible
+	# answers to "which suite gates this run?".
+	candidates="$(
+		find . -maxdepth 4 \
+			\( -name .git -o -name node_modules -o -name venv -o -name .venv \
+			   -o -name vendor -o -name target -o -name build -o -name dist \) -prune -o \
+			-name Makefile -print 2>/dev/null | sed 's|/Makefile$||' | sort
+	)"
+
+	discovered=""
+	found=0
+	while IFS= read -r candidate; do
+		[ -n "$candidate" ] || continue
+		has_test_target "$candidate" || continue
+		discovered="$discovered${candidate#./}
+"
+		found=$((found + 1))
+	done <<-CANDIDATES
+		$candidates
+	CANDIDATES
+
+	if [ "$found" -eq 0 ]; then
+		fail "no Makefile with a 'test' target under $project_root -- this loop uses 'make test' as its gate, so the project needs one. Pass --test-dir DIR if it lives somewhere this didn't look."
+	fi
+
+	if [ "$found" -gt 1 ]; then
+		fail "several 'make test' targets under $project_root -- pass --test-dir to say which one gates this run:
+$(printf '%s' "$discovered" | sed 's|^|  |')"
+	fi
+
+	test_dir="$(printf '%s' "$discovered" | head -1)"
+fi
+
+test_dir_abs="$(cd "$test_dir" && pwd)"
+test_dir_rel="${test_dir#./}"
+
+# The implementing agent runs at the project root, so when the gate is
+# elsewhere it has to be told -- a plain `make test` there would fail, or worse,
+# run some other subproject's suite.
+test_hint=""
+if [ "$test_dir_abs" != "$project_root" ]; then
+	say "gating on the 'make test' target in $test_dir_rel"
+	test_hint="
+
+The test suite for this work is in $test_dir_rel: run it with 'make -C $test_dir_rel test'. There is no test target at the project root."
+fi
+
+export PJ_ISSUES_DIR="$project_root/issues"
 
 "$BIN_DIR/pj-issues" validate >/dev/null || fail "the issue tree doesn't validate -- run 'pj-issues validate' and fix it before starting an unattended run"
 
@@ -122,7 +206,7 @@ log() {
 }
 
 say "run $run_id -- logging to $run_dir"
-log "started in $repo_root"
+log "started in $project_root, gating on $test_dir_abs"
 
 # run_claude PROMPT LOGFILE
 #
@@ -149,7 +233,7 @@ run_claude() {
 		env -u GH_TOKEN -u GITHUB_TOKEN \
 			-u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
 			-u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
-			PJ_STOP_TESTS=1 \
+			PJ_STOP_TESTS=1 PJ_TEST_DIR="$test_dir_abs" \
 			claude -p "$prompt" \
 			--dangerously-skip-permissions \
 			${PJ_CLAUDE_ARGS:-} 2>&1
@@ -196,7 +280,7 @@ Follow that skill's procedure literally, including the red-green-refactor loop
 and its rules about stopping rather than expanding scope. When the issue is
 fully complete, use the pj-commit skill to make exactly one commit for it.
 
-Do not start any other issue. Do not push." "$issue_log" || {
+Do not start any other issue. Do not push.$test_hint" "$issue_log" || {
 		say "claude exited non-zero while implementing $issue_name -- stopping"
 		log "stopped: claude failed on $issue_name"
 		break
@@ -211,7 +295,7 @@ Do not start any other issue. Do not push." "$issue_log" || {
 		break
 	fi
 
-	if ! make test >> "$issue_log" 2>&1; then
+	if ! make -C "$test_dir_abs" test >> "$issue_log" 2>&1; then
 		say "make test is failing after $issue_name -- stopping"
 		log "stopped: make test failed after $issue_name"
 		break
@@ -285,14 +369,14 @@ Write your verdict to $verdict_file. Review only; do not change any code." \
 
 				run_claude "The review in $verdict_file requested changes to your
 implementation of issues/done/$issue_name. Read it, address every finding, keep
-'make test' green, and amend your existing commit (do not add a second commit
-for the same issue). Do not push." "$run_dir/$issue_slug.remediate.log" || {
+the test suite green, and amend your existing commit (do not add a second
+commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remediate.log" || {
 					say "claude exited non-zero while remediating $issue_name -- stopping"
 					log "stopped: claude failed remediating $issue_name"
 					exit 1
 				}
 
-				if ! make test >> "$issue_log" 2>&1; then
+				if ! make -C "$test_dir_abs" test >> "$issue_log" 2>&1; then
 					say "make test is failing after remediation -- stopping"
 					log "stopped: make test failed after remediating $issue_name"
 					exit 1

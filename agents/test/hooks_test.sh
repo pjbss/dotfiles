@@ -216,4 +216,21 @@ print(json.dumps({"cwd": sys.argv[1]}))' "$no_make_project")"
 if out="$(printf '%s' "$nomake_payload" | PJ_STOP_TESTS=1 TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "a project with no make test target is skipped, not treated as failing"
 
+# PJ_TEST_DIR is how pj-run-issues keeps the gate armed in a monorepo: the
+# session's cwd is the project root, which has no Makefile, so without it the
+# check above would skip and the unattended run would have no gate at all.
+if out="$(printf '%s' "$nomake_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$failing_project" \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 2 "$rc" "PJ_TEST_DIR gates on that suite even when the session's cwd has no Makefile"
+assert_contains "$out" "boom: one test failed" "the failure from the PJ_TEST_DIR suite is what comes back"
+
+if out="$(printf '%s' "$stop_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$passing_project" \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "PJ_TEST_DIR wins over the session's cwd rather than being a fallback"
+
+if out="$(printf '%s' "$pass_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$fixture_root/absent" \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "an unreachable PJ_TEST_DIR skips rather than running some other project's suite"
+assert_eq "" "$out" "the skip is silent"
+
 assert_report

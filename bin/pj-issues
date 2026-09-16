@@ -50,8 +50,15 @@ done
 
 . "$DOTFILES_HOME/agents/lib/issues.sh"
 
+# The working directory wins over the repository root, so that a subproject
+# with its own issues/ -- a monorepo package, say -- is read from where you're
+# standing rather than from some unrelated tree at the top of the repo. The
+# repo-root fallback is what lets `pj-issues` still work from a subdirectory of
+# an ordinary single-project repo.
 if [ -n "${PJ_ISSUES_DIR:-}" ]; then
 	issues_dir="$PJ_ISSUES_DIR"
+elif [ -d "$PWD/issues" ]; then
+	issues_dir="$PWD/issues"
 elif repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 	issues_dir="$repo_root/issues"
 else

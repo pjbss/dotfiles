@@ -15,6 +15,12 @@
 # down -- or one unrelated to what they just asked about -- is how a safety gate
 # earns itself a permanent `disableAllHooks`.
 #
+# The suite is the one in PJ_TEST_DIR when pj-run-issues set it, and otherwise
+# the one in the session's own working directory. Those differ in a monorepo,
+# where the agent works from the project root but the Makefile belongs to a
+# subproject -- and without PJ_TEST_DIR the hook would find no Makefile there
+# and skip, quietly leaving an unattended run with no gate at all.
+#
 # A project with no `make test` target is silently skipped rather than treated
 # as passing or failing, since this hook is synced to every project.
 
@@ -30,7 +36,12 @@ except Exception:
     print("")
 ' 2>/dev/null || true)"
 
-[ -n "$cwd" ] && cd "$cwd" 2>/dev/null || true
+gate_dir="${PJ_TEST_DIR:-$cwd}"
+
+# Skipping beats falling back to whatever directory this hook happens to have
+# been started in: a `make test` run against the wrong project would gate the
+# session on a suite that never sees the code it wrote.
+[ -z "$gate_dir" ] || cd "$gate_dir" 2>/dev/null || exit 0
 
 [ -f Makefile ] || exit 0
 grep -q '^test:' Makefile 2>/dev/null || exit 0
@@ -39,7 +50,7 @@ grep -q '^test:' Makefile 2>/dev/null || exit 0
 # post-failure stop, over and over. One retry is the useful amount: it gives
 # the model a chance to fix what it broke, without letting a genuinely
 # unfixable failure spin.
-attempt_marker="${TMPDIR:-/tmp}/pj-stop-tests-$(printf '%s' "$cwd" | tr -c 'A-Za-z0-9' '-')"
+attempt_marker="${TMPDIR:-/tmp}/pj-stop-tests-$(printf '%s' "$gate_dir" | tr -c 'A-Za-z0-9' '-')"
 
 if output="$(make test 2>&1)"; then
 	rm -f "$attempt_marker"

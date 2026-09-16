@@ -84,6 +84,13 @@ case "$prompt" in
 				;;
 		esac
 
+		# What the loop handed this invocation, so the tests can assert on
+		# the environment and prompt a real agent would have received.
+		{
+			echo "PJ_TEST_DIR=${PJ_TEST_DIR:-unset}"
+			echo "$prompt"
+		} > "stub-call-${issue_name%.md}.txt"
+
 		echo "did work" >> "stub-work-${issue_name%.md}.txt"
 		mkdir -p issues/done
 		mv "$issue_file" "issues/done/$issue_name"
@@ -99,15 +106,24 @@ esac
 STUB
 chmod +x "$stub_bin/claude"
 
-# make_repo NAME ISSUE_COUNT -> echoes the repo path
+# make_repo NAME ISSUE_COUNT [PROJECT_SUBDIR] [MAKEFILE_SUBDIR] -> echoes the
+# project path (what the loop is run from, which is not always the repo root)
+#
+# PROJECT_SUBDIR puts the project -- issues/ and the work -- below the git root,
+# the shape of a monorepo package. MAKEFILE_SUBDIR puts the `make test` gate
+# below the project, the shape of a repo whose PRD and issues sit at the top
+# while the suite belongs to one subproject.
 make_repo() {
 	local repo="$fixture_root/$1"
-	mkdir -p "$repo/issues"
+	local project="$repo${3:+/$3}"
+	local makefile_dir="$project${4:+/$4}"
+
+	mkdir -p "$project/issues" "$makefile_dir"
 	git -C "$repo" init -q
 	git -C "$repo" config user.email test@example.com
 	git -C "$repo" config user.name test
 
-	printf 'test:\n\t@true\n' > "$repo/Makefile"
+	printf 'test:\n\t@true\n' > "$makefile_dir/Makefile"
 	# Only issues/ is ignored -- the stub's work file has to be a *tracked*
 	# change, or its `git add -A && git commit` stages nothing and quietly
 	# produces no commit.
@@ -121,7 +137,7 @@ make_repo() {
 		if [ "$n" -gt 1 ]; then
 			blocked="- Blocked by \`issues/$(printf '%03d' $((n - 1)))-slice.md\`"
 		fi
-		cat > "$repo/issues/$number-slice.md" <<-ISSUE
+		cat > "$project/issues/$number-slice.md" <<-ISSUE
 			## Parent PRD
 
 			\`issues/prd.md\`
@@ -147,10 +163,10 @@ make_repo() {
 
 	git -C "$repo" add -A
 	git -C "$repo" commit -q -m "init"
-	echo "$repo"
+	echo "$project"
 }
 
-# run_loop REPO [ARGS...]
+# run_loop PROJECT_DIR [ARGS...]
 run_loop() {
 	local repo="$1"
 	shift
@@ -273,5 +289,78 @@ run_loop "$repo" --no-review
 assert_exit_code 0 "$rc" "--no-review exits 0"
 assert_not_ok "--no-review writes no verdict file" test -d "$repo/issues/reviews"
 assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "--no-review still commits the work"
+
+# === the project is the cwd, not the repo root ==============================
+
+# A monorepo package: the git root holds nothing of its own.
+project="$(make_repo nested 2 app)"
+run_loop "$project"
+assert_exit_code 0 "$rc" "a project in a subdirectory of the repo runs from where it is"
+assert_ok "the work lands in the project directory" test -f "$project/stub-work-001-slice.txt"
+assert_ok "the issues consumed are the project's own" test -f "$project/issues/done/002-slice.md"
+assert_eq "3" "$(git -C "$project" log --oneline | wc -l | tr -d ' ')" \
+	"a nested project still gets exactly one commit per issue"
+
+run_loop "$fixture_root/nested"
+assert_exit_code 1 "$rc" "the repo root of a nested project is not itself a project"
+assert_contains "$out" "not the repository root" \
+	"the refusal explains that the loop anchors on the directory it was run from"
+
+# === finding the `make test` gate ===========================================
+
+# The PRD and issues sit at the top, where the paths written in them resolve,
+# while the suite belongs to one subproject -- the shape that used to fail the
+# preflight outright.
+project="$(make_repo autodiscover 1 "" backend)"
+run_loop "$project"
+assert_exit_code 0 "$rc" "a single nested 'make test' target is found without being named"
+assert_contains "$out" "gating on the 'make test' target in backend" \
+	"the run says which suite it settled on"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "make -C backend test" \
+	"the agent is told where to run the suite, since there is none at its cwd"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_DIR=$project/backend" \
+	"the Stop hook is pointed at the same suite, so the red-test gate isn't silently skipped"
+
+project="$(make_repo ambiguous 1 "" backend)"
+mkdir -p "$project/frontend"
+printf 'test:\n\t@true\n' > "$project/frontend/Makefile"
+git -C "$project" add -A
+git -C "$project" commit -q -m "add a second suite"
+run_loop "$project"
+assert_exit_code 1 "$rc" "two candidate suites are refused rather than guessed between"
+assert_contains "$out" "--test-dir" "the ambiguity refusal names the flag that resolves it"
+assert_contains "$out" "backend" "the ambiguity refusal lists the candidates it found"
+assert_contains "$out" "frontend" "the ambiguity refusal lists all of them"
+
+run_loop "$project" --test-dir backend
+assert_exit_code 0 "$rc" "--test-dir resolves the ambiguity"
+assert_contains "$out" "gating on the 'make test' target in backend" "--test-dir picks that suite"
+
+project="$(make_repo badtestdir 1)"
+run_loop "$project" --test-dir nowhere
+assert_exit_code 1 "$rc" "--test-dir pointing at nothing is refused"
+assert_contains "$out" "not a directory" "the refusal says the directory doesn't exist"
+
+mkdir -p "$project/empty"
+run_loop "$project" --test-dir empty
+assert_exit_code 1 "$rc" "--test-dir pointing at a directory with no test target is refused"
+assert_contains "$out" "no Makefile with a 'test' target" \
+	"the refusal says what was missing, rather than falling back to the root Makefile"
+
+run_loop "$project" --test-dir
+assert_exit_code 1 "$rc" "--test-dir with no value is refused instead of crashing the shell"
+assert_contains "$out" "needs a directory" "the refusal says what --test-dir wants"
+
+# === a red suite in the subdirectory stops the run ==========================
+
+# The point of resolving the gate at all: it has to be able to fail. A run that
+# gates on the wrong Makefile -- or on none -- is an unattended run with no gate.
+project="$(make_repo redgate 2 "" backend)"
+printf 'test:\n\t@false\n' > "$project/backend/Makefile"
+git -C "$project" add -A
+git -C "$project" commit -q -m "make the suite red"
+run_loop "$project"
+assert_contains "$out" "make test is failing" "a red suite in the gate directory stops the run"
+assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"
 
 assert_report

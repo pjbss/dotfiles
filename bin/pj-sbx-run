@@ -11,9 +11,16 @@
 # cannot interfere with them.
 #
 # Everything after the task name is passed through to pj-run-issues, so see
-# `pj-run-issues --help` for --max-issues, --no-review and --dry-run.
+# `pj-run-issues --help` for --max-issues, --test-dir, --no-review and
+# --dry-run. The one exception is --project-dir, which this consumes.
 #
-# Usage: pj-sbx-run <task-name> [pj-run-issues args...] [--help|-h]
+# Usage: pj-sbx-run <task-name> [--project-dir DIR] [pj-run-issues args...] [--help|-h]
+#
+#   --project-dir DIR  Where in the guest to run the loop, absolute or relative
+#                      to /workspace (default: /workspace). pj-run-issues takes
+#                      the directory it's run from as the project, so this is
+#                      how a monorepo package with its own issues/ gets
+#                      reached from the host.
 #
 # Example:
 #   pj-sbx-spawn my-task --base none --no-creds
@@ -52,6 +59,32 @@ if [ -z "$task_name" ]; then
 fi
 shift
 
+# Rebuilt rather than passed through as "$@", because --project-dir is this
+# command's own and must not reach pj-run-issues, which would reject it.
+project_dir="/workspace"
+loop_args=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--project-dir)
+			if [ $# -lt 2 ]; then
+				printf "%spj-sbx-run:%s --project-dir needs a directory\n" "$C_RED" "$C_RESET" >&2
+				exit 1
+			fi
+			project_dir="$2"
+			shift 2
+			;;
+		*)
+			loop_args="$loop_args $1"
+			shift
+			;;
+	esac
+done
+
+case "$project_dir" in
+	/*) ;;
+	*) project_dir="/workspace/$project_dir" ;;
+esac
+
 instance_name="$(sandbox_instance_name "$task_name")"
 
 verify() {
@@ -71,7 +104,7 @@ printf "%spj-sbx-run:%s dispatching the issue loop into '%s'...\n\n" "$C_CYAN" "
 # integrity check is the most important thing this command does, and it has to
 # happen whether the loop succeeded, failed, or was interrupted.
 loop_status=0
-ssh -t "$instance_name" "cd /workspace && pj-run-issues $*" || loop_status=$?
+ssh -t "$instance_name" "cd '$project_dir' && pj-run-issues$loop_args" || loop_status=$?
 
 printf "\n%spj-sbx-run:%s loop exited %s -- re-checking git directory integrity\n" \
 	"$C_CYAN" "$C_RESET" "$loop_status"
