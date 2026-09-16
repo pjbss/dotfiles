@@ -41,12 +41,34 @@ cat > "$stub_bin/claude" <<'STUB'
 #!/bin/sh
 set -eu
 prompt=""
+stream=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		-p) prompt="${2:-}"; shift 2 ;;
+		--output-format)
+			[ "${2:-}" = "stream-json" ] && stream=1
+			shift 2 ;;
 		*) shift ;;
 	esac
 done
+
+# say_stub TEXT -- one unit of output in whichever format the loop asked for.
+#
+# The streaming form is a real, if minimal, stream-json transcript: session
+# noise the renderer must drop, a tool call, a subagent's nested tool call, the
+# agent's own words, and a result. Emitting the real shape is what makes these
+# tests exercise the renderer rather than route around it.
+say_stub() {
+	if [ -z "$stream" ]; then
+		printf '%s\n' "$1"
+		return
+	fi
+	printf '%s\n' '{"type":"system","subtype":"init","cwd":"/workspace"}'
+	printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_stub","name":"Bash","input":{"command":"make test"}}]},"parent_tool_use_id":null}'
+	printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_nested","name":"Read","input":{"file_path":"issues/prd.md"}}]},"parent_tool_use_id":"toolu_stub"}'
+	printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]},"parent_tool_use_id":null}\n' "$1"
+	printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":1234,"total_cost_usd":0.01}'
+}
 
 # Matched on the bare NNN-slug.md, not on a leading `issues/`, because the
 # prompts refer to the same issue by several paths: issues/NNN-x.md when
@@ -59,27 +81,27 @@ case "$prompt" in
 		mkdir -p issues/reviews
 		printf 'Verdict: %s\n\n## Findings\n\nstub review\n' "${STUB_VERDICT:-approved}" \
 			> "issues/reviews/${issue_name%.md}.md"
-		echo "stub: reviewed $issue_name -> ${STUB_VERDICT:-approved}"
+		say_stub "stub: reviewed $issue_name -> ${STUB_VERDICT:-approved}"
 		;;
 
 	*"requested changes to your"*)
 		echo "remediated" >> "stub-work-${issue_name%.md}.txt"
 		git add -A
 		git commit -q --amend --no-edit
-		echo "stub: remediated $issue_name"
+		say_stub "stub: remediated $issue_name"
 		;;
 
 	*"pj-tdd skill"*)
 		case "${STUB_MODE:-normal}" in
 			partial)
-				echo "stub: left $issue_name in issues/ for a human"
+				say_stub "stub: left $issue_name in issues/ for a human"
 				exit 0
 				;;
 			nocommit)
 				echo "did work" >> "stub-work-${issue_name%.md}.txt"
 				mkdir -p issues/done
 				mv "$issue_file" "issues/done/$issue_name"
-				echo "stub: worked on $issue_name but made no commit"
+				say_stub "stub: worked on $issue_name but made no commit"
 				exit 0
 				;;
 		esac
@@ -100,7 +122,7 @@ case "$prompt" in
 Stub implementation.
 
 Issue: issues/$issue_name"
-		echo "stub: implemented and committed $issue_name"
+		say_stub "stub: implemented and committed $issue_name"
 		;;
 esac
 STUB
@@ -242,6 +264,34 @@ assert_ok "a verdict file was written for each issue" test -f "$repo/issues/revi
 assert_ok "the run was logged" bash -c "ls -d '$repo/issues/runs/'*/run.log >/dev/null 2>&1"
 assert_eq "" "$(cd "$repo" && git status --porcelain)" "the loop leaves a clean working tree"
 
+# --- what the console showed while that happened ---------------------------
+#
+# The point of the whole arrangement: an unattended run you can't see is one
+# you can't tell from a hung one, and three agents sharing a terminal are only
+# auditable afterwards if every line says which of them produced it.
+assert_contains "$out" "tdd" "the implementing phase labels its lines"
+assert_contains "$out" "rev" "the review phase is labeled separately from the implementation"
+assert_contains "$out" "gate" "the make test gate is labeled too"
+assert_contains "$out" "Bash" "the agent's tool calls are rendered, not just its final message"
+assert_contains "$out" "make test in" "the gate announces itself before running, so a slow suite doesn't look like a hang"
+assert_contains "$out" "pass" "a green gate says so on that same line"
+assert_contains "$out" "issues/prd.md" "a subagent's tool call is rendered too"
+assert_contains "$out" "↳" "a subagent's work is indented under the phase that spawned it"
+assert_not_contains "$out" '"type":"assistant"' \
+	"the console shows rendered lines, never the raw event stream"
+assert_not_contains "$out" "commands_changed" "session bookkeeping never reaches the console"
+
+run_dir="$(ls -d "$repo/issues/runs/"*/ | head -1)"
+assert_ok "the raw event stream is archived beside the rendered log" \
+	test -f "$run_dir/001-slice.jsonl"
+assert_contains "$(cat "$run_dir/001-slice.jsonl")" '"type":"result"' \
+	"the archive is claude's untouched stream, for when the rendering dropped what you needed"
+assert_contains "$(cat "$run_dir/001-slice.log")" "Bash" \
+	"the issue log holds the rendered lines"
+assert_not_contains "$(cat "$run_dir/001-slice.log")" '"type":"assistant"' \
+	"the rendered log isn't a second copy of the JSONL"
+assert_ok "each phase archives its own stream" test -f "$run_dir/001-slice.review.jsonl"
+
 # === --max-issues ===========================================================
 
 repo="$(make_repo capped 3)"
@@ -356,11 +406,40 @@ assert_contains "$out" "needs a directory" "the refusal says what --test-dir wan
 # The point of resolving the gate at all: it has to be able to fail. A run that
 # gates on the wrong Makefile -- or on none -- is an unattended run with no gate.
 project="$(make_repo redgate 2 "" backend)"
-printf 'test:\n\t@false\n' > "$project/backend/Makefile"
+printf 'test:\n\t@echo GATE_DETAIL_LINE; exit 1\n' > "$project/backend/Makefile"
 git -C "$project" add -A
 git -C "$project" commit -q -m "make the suite red"
 run_loop "$project"
 assert_contains "$out" "make test is failing" "a red suite in the gate directory stops the run"
+assert_contains "$out" "GATE_DETAIL_LINE" \
+	"a red gate prints the output on the spot -- the reason the run stopped shouldn't need a log dive"
 assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"
+
+# === --plain, the escape hatch ==============================================
+
+# For the one failure this repo can't control: a claude release whose
+# stream-json schema the renderer doesn't understand yet.
+repo="$(make_repo plain 1)"
+run_loop "$repo" --plain
+assert_exit_code 0 "$rc" "--plain exits 0"
+assert_contains "$out" "stub: implemented and committed" "--plain prints the agent's final message"
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "--plain still commits the work"
+plain_run_dir="$(ls -d "$repo/issues/runs/"*/ | head -1)"
+assert_not_ok "--plain archives no event stream, because there wasn't one" \
+	test -f "$plain_run_dir/001-slice.jsonl"
+
+# === PJ_CLAUDE_ARGS overriding the output format ============================
+
+# Last --output-format wins, so this wouldn't fail -- it would leave the
+# renderer unable to read the stream and the run reporting nothing for hours.
+repo="$(make_repo argsconflict 1)"
+if out="$(cd "$repo" && PATH="$stub_bin:$PATH" PJ_SANDBOX_MARKER="$marker" \
+	PJ_CLAUDE_ARGS="--output-format json" NO_COLOR=1 "$RUN_ISSUES" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 1 "$rc" "PJ_CLAUDE_ARGS overriding --output-format is refused rather than silently blinding the run"
+assert_contains "$out" "--plain" "the refusal names the deliberate way to give the stream up"
+
+if out="$(cd "$repo" && PATH="$stub_bin:$PATH" PJ_SANDBOX_MARKER="$marker" \
+	PJ_CLAUDE_ARGS="--output-format json" NO_COLOR=1 "$RUN_ISSUES" --plain 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "--plain makes that override allowed again, since nothing is rendering"
 
 assert_report

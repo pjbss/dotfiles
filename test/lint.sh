@@ -11,6 +11,12 @@
 # qualifiers, `${(%):-%x}`) is a syntax error to `sh -n`. Files with no shebang
 # are the sourced `lib/*.sh` fragments, which are POSIX sh by convention.
 #
+# Not every source here is shell any more: agents/lib/stream_render.py parses
+# the event stream pj-run-issues renders. Left to the fallback it would be
+# handed to `sh -n`, which rejects Python outright -- so it would have been
+# either a permanent lint failure or, worse, quietly excluded from the only
+# syntax gate this repo has.
+#
 # Vendored vim bundles and the gitignored local/ tree are skipped -- neither is
 # this repo's code to lint.
 #
@@ -34,6 +40,15 @@ done
 
 cd "$DOTFILES_HOME"
 
+# lint_python FILE
+#
+# Syntax-checks a Python source. `ast.parse` rather than `python3 -m
+# py_compile`, whose side effect is a __pycache__ directory littered into the
+# tree it was asked to check.
+lint_python() {
+	python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$1"
+}
+
 # lint_interpreter FILE
 #
 # Echoes the syntax-check command for FILE, or nothing if it should be skipped
@@ -51,9 +66,17 @@ lint_interpreter() {
 			;;
 	esac
 
+	case "$1" in
+		*.py)
+			command -v python3 >/dev/null 2>&1 && echo "lint_python"
+			return 0
+			;;
+	esac
+
 	case "$(head -1 "$1")" in
 		'#!'*zsh) command -v zsh >/dev/null 2>&1 && echo "zsh -n" ;;
 		'#!'*bash) echo "bash -n" ;;
+		'#!'*python*) command -v python3 >/dev/null 2>&1 && echo "lint_python" ;;
 		*) echo "sh -n" ;;
 	esac
 }
@@ -67,6 +90,7 @@ files="$(
 	{
 		find bin -type f || true
 		find sandbox/lib agents/lib test -type f -name '*.sh' 2>/dev/null || true
+		find agents/lib -type f -name '*.py' 2>/dev/null || true
 		find sandbox/test zsh/modules/test agents/test -type f -name '*.sh' 2>/dev/null || true
 		find zsh -type f -name '*.zsh' || true
 		echo install.sh
@@ -103,7 +127,7 @@ if command -v shellcheck >/dev/null 2>&1; then
 		[ -f "$file" ] || continue
 
 		case "$file" in
-			*.zsh) continue ;;
+			*.zsh | *.py) continue ;;
 		esac
 
 		case "$(head -1 "$file")" in

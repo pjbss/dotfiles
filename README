@@ -203,7 +203,34 @@ Per issue it implements test-first via `pj-tdd`, runs `make test`, commits via
 `pj-commit`, and reviews the commit with `pj-review` in a separate process. It
 stops at the first thing that isn't clean rather than building on top of it --
 a red suite, an issue `pj-tdd` left for a human, a missing commit, or a second
-`changes-requested`. Logs land in `issues/runs/<timestamp>/`.
+`changes-requested`.
+
+It prints what it is doing while it does it, one line per tool call, each
+labeled with the agent that produced it -- `tdd` while `pj-tdd` implements,
+`rev` while the reviewer reads, `fix` during a remediation pass, `gate` for
+`make test`, `loop` for the loop's own decisions:
+
+    17:02:11 tdd  ▸ Read   issues/003-csv-export.md
+    17:02:19 tdd  ▸ Bash   make test
+    17:02:20 tdd  ✗ Bash   Exit code 1
+    17:02:52 tdd  ▸ Agent  pj-test-auditor
+    17:02:58 tdd    ↳ Read   test/csv_export_test.sh
+    17:03:10 tdd  ✓ finished  4m12s  $0.41
+    17:03:10 gate ▸ make test in . ... pass
+    17:03:39 rev  · Verdict: approved
+    17:03:40 loop ✓ committed 003-csv-export.md as a1b2c3d
+
+Work a phase did through a subagent is indented under it, because "the
+implementer checked its own tests" and "a separate auditor checked them" are
+different claims. An unattended run you can't see is one you can't tell from a
+hung one, which is the whole reason this is here.
+
+Logs land in `issues/runs/<timestamp>/`, two per phase: `<issue>.log` is those
+same lines without the color, and `<issue>.jsonl` is claude's untouched event
+stream, for when the rendering turns out to have dropped the one thing you
+needed. `--plain` gives the stream up and goes back to printing only each
+agent's final message -- the escape hatch for a `claude` release whose event
+schema this doesn't understand yet.
 
 The project needs a `make test` target: that's the loop's only real check that
 the work works, and the `Stop` hook uses it to refuse to let a session finish
@@ -366,6 +393,15 @@ drains the ready queue. Per issue: implement it test-first via `pj-tdd`, run
 has already been told why every decision was right, and reliably agrees. A
 `changes-requested` verdict gets exactly one remediation pass before the loop
 stops for a human.
+
+Each of those processes is asked for its event stream rather than its final
+message, and `agents/lib/stream_render.py` turns that back into one labeled
+line per tool call. Without it a phase prints nothing for minutes and then a
+paragraph, which is indistinguishable from a hang and unauditable afterwards --
+and "the reviewer was a separate process that re-read the code" is exactly the
+kind of claim that is worth being able to check rather than take on trust. The
+raw stream is archived unmodified beside the rendered log, so the rendering is
+never the only surviving record.
 
 It stops on the first thing that doesn't go cleanly rather than pressing on:
 a red suite, an issue `pj-tdd` left for a human, an issue that produced no

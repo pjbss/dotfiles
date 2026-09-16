@@ -15,7 +15,7 @@
 # already been told why every decision was right, and reliably agrees.
 #
 # Usage: pj-run-issues [--max-issues N] [--test-dir DIR] [--no-review]
-#                      [--dry-run] [--force] [--help|-h]
+#                      [--dry-run] [--plain] [--force] [--help|-h]
 #
 #   --max-issues N  Stop after N issues (default: drain the queue).
 #   --test-dir DIR  Directory holding the Makefile whose `test` target gates
@@ -23,8 +23,23 @@
 #   --no-review     Skip the review pass. For a first smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
+#   --plain         Print each agent's final message instead of its live event
+#                   stream. The escape hatch, see below.
 #   --force         Run outside a sandbox. See below; you almost certainly
 #                   don't want this.
+#
+# Every line of output is labeled with the agent that produced it -- `tdd`
+# while pj-tdd implements, `rev` while the reviewer reads, `fix` during a
+# remediation pass, `gate` for `make test`, `loop` for the loop's own
+# decisions -- and colored to match. Three agents and their subagents write to
+# one terminal over a run of hours; an unlabeled stream of that is not
+# something anyone can audit afterwards, which defeats the point of watching an
+# unattended run at all.
+#
+# --plain gives up the stream and goes back to printing only each agent's final
+# message. It exists for one failure this repo can't control: a claude release
+# whose stream-json schema the renderer doesn't understand yet would turn every
+# line into an unparsed passthrough.
 #
 # The project is the directory this is run from, not the enclosing git
 # repository's root. In a monorepo those aren't the same thing, and the repo
@@ -65,6 +80,17 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 . "$DOTFILES_HOME/sandbox/lib/color.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
 
+# Declared in one place so a terminal that mangles them is a three-line fix
+# rather than a search across the file.
+GLYPH_STEP='▸'
+GLYPH_OK='✓'
+GLYPH_BAD='✗'
+
+# Asked once, here, because the renderer runs mid-pipeline where stdout is no
+# longer the terminal and `tput cols` would answer for the pipe.
+term_width="$(tput cols 2>/dev/null || true)"
+[ -n "$term_width" ] || term_width=100
+
 for arg in "$@"; do
 	case "$arg" in
 		--help | -h)
@@ -74,19 +100,60 @@ for arg in "$@"; do
 	esac
 done
 
+# A fatal refusal keeps the program name rather than a phase label: it may
+# arrive through pj-sbx-run's ssh hop, where "which command said this" is the
+# first thing you need to know.
 fail() {
 	printf "%spj-run-issues:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
 	exit 1
 }
 
+# phase_color LABEL -- the color a phase's lines are printed in.
+#
+# sandbox/lib/color.sh owns the palette, so that the escape sequence for
+# "yellow" is decided in one place for every pj- command. The renderer keeps a
+# matching table of its own, since it is a separate process and threading the
+# codes through argv would be worse than restating three constants -- if one
+# side's shades move, move the other's.
+phase_color() {
+	case "$1" in
+		tdd) printf '%s' "$C_GREEN" ;;
+		rev) printf '%s' "$C_MAGENTA" ;;
+		fix) printf '%s' "$C_YELLOW" ;;
+		gate) printf '%s' "$C_BLUE" ;;
+		*) printf '%s' "$C_CYAN" ;;
+	esac
+}
+
+# emit LABEL GLYPH MESSAGE
+#
+# One line in the same shape agents/lib/stream_render.py renders, for the
+# loop's own events. The shapes match deliberately: the console is one stream
+# with several writers, and it reads as a single coherent log only if nothing
+# in it is shaped differently from everything else.
+emit() {
+	printf '%s %s%-4s%s %s %s\n' \
+		"$(date +%H:%M:%S)" "$(phase_color "$1")" "$1" "$C_RESET" "$2" "$3"
+}
+
 say() {
-	printf "%spj-run-issues:%s %s\n" "$C_CYAN" "$C_RESET" "$1"
+	emit loop "$GLYPH_STEP" "$1"
+}
+
+# say_phase LABEL MESSAGE -- a loop decision that belongs to one agent's turn.
+say_phase() {
+	emit "$1" "$GLYPH_STEP" "$2"
+}
+
+say_ok() {
+	emit "$1" "$GLYPH_OK" "$2"
 }
 
 max_issues=""
 test_dir=""
 review=1
 dry_run=""
+plain=""
 force=""
 
 while [ $# -gt 0 ]; do
@@ -99,6 +166,7 @@ while [ $# -gt 0 ]; do
 			test_dir="$2"; shift 2 ;;
 		--no-review) review=""; shift ;;
 		--dry-run) dry_run=1; shift ;;
+		--plain) plain=1; shift ;;
 		--force) force=1; shift ;;
 		*)
 			fail "unknown argument '$1'"
@@ -109,6 +177,18 @@ done
 if [ ! -f "${PJ_SANDBOX_MARKER:-/etc/pj-sandbox}" ] && [ -z "$force" ]; then
 	fail "not inside a sandbox. This runs a coding agent unattended with permissions disabled -- the VM is what makes that reasonable. Spawn one with 'pj-sbx-spawn <task> --base <name> --no-creds' and run it there, or pass --force if you genuinely mean to do this on this machine."
 fi
+
+# PJ_CLAUDE_ARGS is appended after the flags below, and claude takes the last
+# --output-format it is given. Overriding it there wouldn't fail -- it would
+# leave the renderer with a format it can't read, and the run would go blind
+# for its whole duration while still exiting 0. Refuse it instead: a run that
+# won't start is recoverable in a way one that silently stopped reporting is
+# not.
+case "${PJ_CLAUDE_ARGS:-}" in
+	*--output-format*)
+		[ -n "$plain" ] || fail "PJ_CLAUDE_ARGS sets --output-format, which this loop needs for its live event stream -- a run with that overridden reports nothing for hours rather than failing. Drop it, or pass --plain to give the stream up deliberately."
+		;;
+esac
 
 git rev-parse --show-toplevel >/dev/null 2>&1 || fail "must be run from inside a git repository"
 project_root="$PWD"
@@ -208,17 +288,42 @@ log() {
 say "run $run_id -- logging to $run_dir"
 log "started in $project_root, gating on $test_dir_abs"
 
-# run_claude PROMPT LOGFILE
+# run_claude_sink RENDERER_ARGS... -- where a phase's output goes.
 #
-# One headless Claude Code invocation, streamed to the terminal and appended to
-# LOGFILE. Returns claude's own exit status.
+# Split out of the pipeline below only so that pipeline has one stage and no
+# inline conditional in it. Reads $plain and $logfile from run_claude, which is
+# the only caller.
+run_claude_sink() {
+	if [ -n "$plain" ]; then
+		tee -a "$logfile"
+	else
+		# The raw stream is archived before rendering, so the archive is what
+		# claude actually said rather than what this repo understood of it.
+		tee -a "${logfile%.log}.jsonl" | python3 -u "$@"
+	fi
+}
+
+# run_claude PROMPT LOGFILE PHASE
 #
-# Getting that status takes the `echo $? > status_file` dance because output is
-# piped through tee, and a POSIX pipeline's status is the *last* command's --
-# so a plain `claude ... | tee` would report tee's success no matter how badly
+# One headless Claude Code invocation, rendered live to the terminal as a
+# labeled event stream and archived twice: the rendered lines, without color,
+# to LOGFILE, and claude's untouched JSONL beside it as LOGFILE with a .jsonl
+# extension. Both, because the rendered log is the one you read and the JSONL
+# is the one you re-render or grep when the rendering turns out to have dropped
+# the thing you needed. Returns claude's own exit status.
+#
+# PHASE is the label every line of this invocation carries (tdd, rev, fix).
+# claude's default text output would print nothing at all until the phase ends
+# and then emit one undifferentiated blob -- which is least acceptable in
+# exactly this case, since the reason to watch an unattended run is to see, as
+# it happens, that the implementing agent is on the issue you meant and the
+# reviewer is a separate process that actually re-read the code.
+#
+# Getting claude's status still takes the `echo $? > status_file` dance:
+# output is piped, and a POSIX pipeline's status is the *last* command's -- so
+# a plain `claude ... | tee` would report tee's success no matter how badly
 # claude failed. The alternative, buffering to a file and printing it
-# afterwards, would cost the live progress that makes a long unattended run
-# watchable.
+# afterwards, would cost exactly the live progress this is all for.
 #
 # Credentials are stripped here rather than once at the top so it stays true
 # however the loop was invoked, and with `env -u` rather than `unset` so the
@@ -226,19 +331,41 @@ log "started in $project_root, gating on $test_dir_abs"
 run_claude() {
 	prompt="$1"
 	logfile="$2"
+	phase="$3"
 
 	claude_status_file="$(mktemp)"
 
+	# The sink is built with `set --` so the pipeline below has no unquoted
+	# expansion in it -- `$@` carries the renderer's arguments, escape
+	# sequence and all, as single words under `set -u`.
+	if [ -n "$plain" ]; then
+		format_args=""
+		set --
+	else
+		format_args="--verbose --output-format stream-json"
+		set -- "$DOTFILES_HOME/agents/lib/stream_render.py" \
+			--label "$phase" --log "$logfile" --width "$term_width"
+		# $C_RESET is the authoritative "color is on" answer: color.sh
+		# already weighed $NO_COLOR and both streams being terminals. The
+		# renderer sits mid-pipeline, where its own isatty check would say
+		# no whatever the terminal is.
+		if [ -n "$C_RESET" ]; then
+			set -- "$@" --color
+		fi
+	fi
+
 	{
+		# shellcheck disable=SC2086  # deliberate splitting: both are flag lists
 		env -u GH_TOKEN -u GITHUB_TOKEN \
 			-u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
 			-u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
 			PJ_STOP_TESTS=1 PJ_TEST_DIR="$test_dir_abs" \
 			claude -p "$prompt" \
 			--dangerously-skip-permissions \
+			$format_args \
 			${PJ_CLAUDE_ARGS:-} 2>&1
 		echo $? > "$claude_status_file"
-	} | tee -a "$logfile"
+	} | run_claude_sink "$@"
 
 	# Empty when claude was killed outright (SIGKILL, or the VM going away)
 	# before it could write its status -- treat that as a failure rather than
@@ -248,6 +375,41 @@ run_claude() {
 	[ -n "$claude_status" ] || claude_status=1
 
 	return "$claude_status"
+}
+
+# make_test_gate LOGFILE -> 0 pass, 1 fail
+#
+# The gate suite, as one line. Until now it printed nothing at all: the run's
+# only real check that the work works was the one part of the run you couldn't
+# watch. A green gate should cost a glance; a red one has to show why on the
+# spot, because the reason the run just stopped is in that output and nobody
+# should have to go find a log for it. The full output goes to LOGFILE either
+# way, and only the tail is printed -- a suite with a thousand lines of chatter
+# would otherwise bury the failure it just reported as thoroughly as silence.
+make_test_gate() {
+	gate_output="$(mktemp)"
+
+	printf '%s %s%-4s%s %s %s' \
+		"$(date +%H:%M:%S)" "$(phase_color gate)" "gate" "$C_RESET" \
+		"$GLYPH_STEP" "make test in ${test_dir_rel:-.} ... "
+
+	if make -C "$test_dir_abs" test > "$gate_output" 2>&1; then
+		gate_status=0
+	else
+		gate_status=$?
+	fi
+
+	cat "$gate_output" >> "$1"
+
+	if [ "$gate_status" -eq 0 ]; then
+		printf '%s\n' "pass"
+	else
+		printf '%s%s (exit %s)%s\n' "$C_RED" "$GLYPH_BAD" "$gate_status" "$C_RESET"
+		tail -n 40 "$gate_output" | sed 's/^/             /'
+	fi
+
+	rm -f "$gate_output"
+	return "$gate_status"
 }
 
 completed=0
@@ -269,7 +431,7 @@ while :; do
 	issue_slug="${issue_name%.md}"
 	issue_log="$run_dir/$issue_slug.log"
 
-	say "implementing $issue_name"
+	say_phase tdd "implementing $issue_name"
 	log "implementing $issue_name"
 
 	commit_before="$(git rev-parse HEAD)"
@@ -280,8 +442,8 @@ Follow that skill's procedure literally, including the red-green-refactor loop
 and its rules about stopping rather than expanding scope. When the issue is
 fully complete, use the pj-commit skill to make exactly one commit for it.
 
-Do not start any other issue. Do not push.$test_hint" "$issue_log" || {
-		say "claude exited non-zero while implementing $issue_name -- stopping"
+Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
+		say_phase tdd "claude exited non-zero while implementing $issue_name -- stopping"
 		log "stopped: claude failed on $issue_name"
 		break
 	}
@@ -290,13 +452,13 @@ Do not start any other issue. Do not push.$test_hint" "$issue_log" || {
 	# criterion needs a human. Detecting that here is what stops the loop
 	# picking the same issue up again forever.
 	if [ -f "$issue_path" ]; then
-		say "$issue_name is still in issues/ -- pj-tdd left it for a human (see its Notes section)"
+		say_phase tdd "$issue_name is still in issues/ -- pj-tdd left it for a human (see its Notes section)"
 		log "stopped: $issue_name not completed, left in issues/"
 		break
 	fi
 
-	if ! make -C "$test_dir_abs" test >> "$issue_log" 2>&1; then
-		say "make test is failing after $issue_name -- stopping"
+	if ! make_test_gate "$issue_log"; then
+		say_phase gate "make test is failing after $issue_name -- stopping"
 		log "stopped: make test failed after $issue_name"
 		break
 	fi
@@ -315,7 +477,7 @@ Do not start any other issue. Do not push.$test_hint" "$issue_log" || {
 	fi
 
 	completed=$((completed + 1))
-	say "committed $issue_name as $(git rev-parse --short HEAD)"
+	say_ok loop "committed $issue_name as $(git rev-parse --short HEAD)"
 	log "committed $issue_name as $commit_after"
 
 	[ -n "$review" ] || continue
@@ -326,21 +488,21 @@ Do not start any other issue. Do not push.$test_hint" "$issue_log" || {
 	attempt=1
 
 	while :; do
-		say "reviewing $issue_name (attempt $attempt)"
+		say_phase rev "reviewing $issue_name (attempt $attempt)"
 		rm -f "$verdict_file"
 
 		run_claude "Use the pj-review skill to review the implementation of
 issues/done/$issue_name, as committed in $commit_before..$(git rev-parse HEAD).
 
 Write your verdict to $verdict_file. Review only; do not change any code." \
-			"$run_dir/$issue_slug.review.log" || {
-			say "claude exited non-zero while reviewing $issue_name -- stopping"
+			"$run_dir/$issue_slug.review.log" rev || {
+			say_phase rev "claude exited non-zero while reviewing $issue_name -- stopping"
 			log "stopped: claude failed reviewing $issue_name"
 			exit 1
 		}
 
 		if [ ! -f "$verdict_file" ]; then
-			say "the review produced no verdict file -- stopping"
+			say_phase rev "the review produced no verdict file -- stopping"
 			log "stopped: no verdict file for $issue_name"
 			exit 1
 		fi
@@ -350,12 +512,12 @@ Write your verdict to $verdict_file. Review only; do not change any code." \
 
 		case "$verdict" in
 			"Verdict: approved")
-				say "approved"
+				say_ok rev "approved"
 				break
 				;;
 			"Verdict: changes-requested")
 				if [ "$attempt" -ge 2 ]; then
-					say "still changes-requested after a remediation pass -- stopping for a human"
+					say_phase rev "still changes-requested after a remediation pass -- stopping for a human"
 					log "stopped: $issue_name unresolved after remediation"
 					# Back out of done/ so the queue reflects reality: this
 					# issue is not finished, and a later run must not skip it.
@@ -364,20 +526,20 @@ Write your verdict to $verdict_file. Review only; do not change any code." \
 					exit 1
 				fi
 
-				say "changes requested -- one remediation pass"
+				say_phase rev "changes requested -- one remediation pass"
 				log "remediating $issue_name"
 
 				run_claude "The review in $verdict_file requested changes to your
 implementation of issues/done/$issue_name. Read it, address every finding, keep
 the test suite green, and amend your existing commit (do not add a second
-commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remediate.log" || {
-					say "claude exited non-zero while remediating $issue_name -- stopping"
+commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remediate.log" fix || {
+					say_phase fix "claude exited non-zero while remediating $issue_name -- stopping"
 					log "stopped: claude failed remediating $issue_name"
 					exit 1
 				}
 
-				if ! make -C "$test_dir_abs" test >> "$issue_log" 2>&1; then
-					say "make test is failing after remediation -- stopping"
+				if ! make_test_gate "$issue_log"; then
+					say_phase gate "make test is failing after remediation -- stopping"
 					log "stopped: make test failed after remediating $issue_name"
 					exit 1
 				fi
@@ -385,7 +547,7 @@ commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remedi
 				attempt=$((attempt + 1))
 				;;
 			*)
-				say "unrecognized verdict line '$verdict' in $verdict_file -- stopping"
+				say_phase rev "unrecognized verdict line '$verdict' in $verdict_file -- stopping"
 				log "stopped: unrecognized verdict for $issue_name"
 				exit 1
 				;;
@@ -393,7 +555,7 @@ commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remedi
 	done
 done
 
-say "done -- $completed issue(s) completed this run"
+say_ok loop "done -- $completed issue(s) completed this run"
 log "finished: $completed issue(s)"
 
 echo

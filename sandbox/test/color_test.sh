@@ -48,21 +48,32 @@ fi
 sandbox_color_supported() { return 0; }
 sandbox_color_init
 
-if [ -n "$C_BOLD" ] && [ -n "$C_RED" ] && [ -n "$C_CYAN" ] && [ -n "$C_YELLOW" ] && [ -n "$C_RESET" ]; then
+missing=""
+for name in C_BOLD C_DIM C_RED C_GREEN C_YELLOW C_BLUE C_MAGENTA C_CYAN C_RESET; do
+	eval "value=\$$name"
+	[ -n "$value" ] || missing="$missing $name"
+done
+
+if [ -z "$missing" ]; then
 	echo "PASS: sandbox_color_init sets non-empty escape codes when color is supported"
 else
-	echo "FAIL: sandbox_color_init sets non-empty escape codes when color is supported (C_BOLD='$C_BOLD' C_RED='$C_RED' C_CYAN='$C_CYAN' C_YELLOW='$C_YELLOW' C_RESET='$C_RESET')"
+	echo "FAIL: sandbox_color_init sets non-empty escape codes when color is supported (empty:$missing)"
 	failures=$((failures + 1))
 fi
+
+# Every color is a distinct sequence -- a copy-paste slip that gave two of
+# them the same code would make pj-run-issues' per-agent labels
+# indistinguishable, which is the whole point of having them.
+distinct="$(printf '%s\n' "$C_RED" "$C_GREEN" "$C_YELLOW" "$C_BLUE" "$C_MAGENTA" "$C_CYAN" | sort -u | wc -l | tr -d ' ')"
+assert_eq "6" "$distinct" "the six label colors are six different escape sequences"
 
 sandbox_color_supported() { return 1; }
 sandbox_color_init
 
-assert_eq "" "$C_BOLD" "sandbox_color_init sets C_BOLD empty when color isn't supported"
-assert_eq "" "$C_RED" "sandbox_color_init sets C_RED empty when color isn't supported"
-assert_eq "" "$C_CYAN" "sandbox_color_init sets C_CYAN empty when color isn't supported"
-assert_eq "" "$C_YELLOW" "sandbox_color_init sets C_YELLOW empty when color isn't supported"
-assert_eq "" "$C_RESET" "sandbox_color_init sets C_RESET empty when color isn't supported"
+for name in C_BOLD C_DIM C_RED C_GREEN C_YELLOW C_BLUE C_MAGENTA C_CYAN C_RESET; do
+	eval "value=\$$name"
+	assert_eq "" "$value" "sandbox_color_init sets $name empty when color isn't supported"
+done
 
 unset -f sandbox_color_supported
 
