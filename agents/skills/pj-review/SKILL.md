@@ -17,9 +17,12 @@ wrong precisely enough that the next pass can fix it.
 
 - The issue file. In a normal run it has just been moved to `issues/done/`,
   so check both `issues/` and `issues/done/`.
-- A diff range, usually the single commit that closed the issue
-  (`git show`, or `git diff <base>..HEAD`). If you weren't given one, ask
-  rather than guessing at a range.
+- The change itself. In an unattended run it is not committed yet -- the work
+  is reviewed before it is committed, so it arrives staged, and `git diff
+  --cached` shows all of it including new files. Reviewing it by hand after the
+  fact instead, you'll be given a diff range: the single commit that closed the
+  issue (`git show`, or `git diff <base>..HEAD`). If you weren't given either,
+  ask rather than guessing at a range.
 
 ## Process
 
@@ -71,7 +74,7 @@ first, exact, and lowercase-hyphenated. Then:
 ```markdown
 ## Reviewed
 
-`issues/NNN-slug.md` at <commit sha>, `make test`: <passed | failed | not run>
+`issues/NNN-slug.md` at <commit sha, or "staged">, `make test`: <passed | failed | not run>
 
 ## Findings
 

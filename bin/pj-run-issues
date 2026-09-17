@@ -2,17 +2,33 @@
 # pj-run-issues
 #
 # Drains the ready queue in `issues/`: for each unblocked issue, implement it
-# test-first, run the suite, commit, then review it in a fresh context before
-# moving on. Stops on the first thing that doesn't go cleanly, rather than
-# pressing on and burying the failure under later work.
+# test-first, run the suite, review it in a fresh context, and commit it only
+# once that review approves. Stops on the first thing that doesn't go cleanly,
+# rather than pressing on and burying the failure under later work.
 #
 # One commit per issue is the point of the whole arrangement -- it's what makes
 # an unattended run reviewable afterwards one issue at a time, instead of
 # arriving as a single undifferentiated branch.
 #
+# Nothing is committed before it has been reviewed. The implementing agent is
+# told to leave its work in the working tree; this loop stages it, gates it on
+# `make test`, has it reviewed, and makes the commit itself. Reviewing after
+# the commit instead -- which is what this used to do -- meant a review could
+# only ask for an amendment, so an issue that failed review twice went back
+# onto the queue while its commit stayed in the branch, and the next run built
+# a second commit for the same issue. There is nothing to disown if nothing was
+# committed.
+#
+# The commit is made by pj-commit in its own process rather than by the
+# implementing agent, so "exactly one commit per issue" doesn't rest on an
+# agent having followed an instruction.
+#
 # The review runs as a separate `claude -p` process, not a subagent of the
 # implementing session. A reviewer that shares context with the author has
-# already been told why every decision was right, and reliably agrees.
+# already been told why every decision was right, and reliably agrees. Its
+# findings are printed, not just its verdict: a review whose substance lives
+# only in a file nobody is watching is indistinguishable from one that never
+# ran.
 #
 # Usage: pj-run-issues [--max-issues N] [--test-dir DIR] [--no-review]
 #                      [--dry-run] [--plain] [--force] [--help|-h]
@@ -30,8 +46,8 @@
 #
 # Every line of output is labeled with the agent that produced it -- `tdd`
 # while pj-tdd implements, `rev` while the reviewer reads, `fix` during a
-# remediation pass, `gate` for `make test`, `loop` for the loop's own
-# decisions -- and colored to match. Three agents and their subagents write to
+# remediation pass, `gate` for `make test`, `git` while pj-commit writes the
+# commit, `loop` for the loop's own decisions -- and colored to match. Three agents and their subagents write to
 # one terminal over a run of hours; an unlabeled stream of that is not
 # something anyone can audit afterwards, which defeats the point of watching an
 # unattended run at all.
@@ -85,6 +101,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 GLYPH_STEP='▸'
 GLYPH_OK='✓'
 GLYPH_BAD='✗'
+GLYPH_SUB='↳'
 
 # Asked once, here, because the renderer runs mid-pipeline where stdout is no
 # longer the terminal and `tput cols` would answer for the pipe.
@@ -121,6 +138,7 @@ phase_color() {
 		rev) printf '%s' "$C_MAGENTA" ;;
 		fix) printf '%s' "$C_YELLOW" ;;
 		gate) printf '%s' "$C_BLUE" ;;
+		git) printf '%s' "$C_BOLD" ;;
 		*) printf '%s' "$C_CYAN" ;;
 	esac
 }
@@ -147,6 +165,46 @@ say_phase() {
 
 say_ok() {
 	emit "$1" "$GLYPH_OK" "$2"
+}
+
+say_bad() {
+	emit "$1" "$GLYPH_BAD" "$2"
+}
+
+# say_sub LABEL MESSAGE -- a line subordinate to the one above it, in the same
+# shape the renderer indents a subagent's work.
+say_sub() {
+	printf '%s %s%-4s%s   %s %s\n' \
+		"$(date +%H:%M:%S)" "$(phase_color "$1")" "$1" "$C_RESET" "$GLYPH_SUB" "$2"
+}
+
+# say_verdict VERDICT_FILE WANT
+#
+# Puts the review's own words on the console. The loop used to read only the
+# first line of this file and print "changes requested", leaving the findings --
+# the entire substance of the review -- visible nowhere but a file nobody was
+# watching. That made an enforced review look like a skipped one, and gave no
+# way to judge whether the remediation pass that followed had addressed the
+# thing that was actually wrong.
+#
+# WANT is `reviewed` or `findings`. On a clean verdict only the `## Reviewed`
+# line is worth printing: it names the sha and whether the reviewer ran the
+# suite itself rather than taking a green claim on trust, which is the one
+# thing worth seeing on every issue. Findings are printed in full, because a
+# run that stops for a human should already have said why.
+say_verdict() {
+	[ -f "$1" ] || return 0
+
+	awk -v want="$2" '
+		/^## Reviewed/ { section = "reviewed"; next }
+		/^## Findings/ { section = "findings"; next }
+		/^## / { section = "other"; next }
+		section != want { next }
+		NF == 0 { next }
+		{ print }
+	' "$1" | while IFS= read -r line; do
+		say_sub rev "$line"
+	done
 }
 
 max_issues=""
@@ -439,10 +497,11 @@ while :; do
 	run_claude "Use the pj-tdd skill to implement exactly this one issue: $issue_path
 
 Follow that skill's procedure literally, including the red-green-refactor loop
-and its rules about stopping rather than expanding scope. When the issue is
-fully complete, use the pj-commit skill to make exactly one commit for it.
+and its rules about stopping rather than expanding scope.
 
-Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
+Do not commit. Leave your work uncommitted in the working tree: it is reviewed
+before it is committed, and this loop makes the commit itself once the review
+passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
 		say_phase tdd "claude exited non-zero while implementing $issue_name -- stopping"
 		log "stopped: claude failed on $issue_name"
 		break
@@ -457,44 +516,55 @@ Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
 		break
 	fi
 
+	# An implementation that committed anyway is rewound rather than refused:
+	# the content is all still there, and collapsing it back into the working
+	# tree keeps one path through the rest of the loop -- review, then exactly
+	# one commit made here. Refusing instead would strand finished work.
+	if [ "$(git rev-parse HEAD)" != "$commit_before" ]; then
+		say_phase tdd "$issue_name was committed despite the instruction not to -- rewinding so the review sees it before it lands"
+		log "rewound a premature commit for $issue_name"
+		git reset --soft "$commit_before" >/dev/null
+	fi
+
+	# Staged rather than left loose so that one command -- `git diff --cached`
+	# -- shows the reviewer every change including new files, which a plain
+	# `git diff` would silently omit.
+	git add -A
+
+	if git diff --cached --quiet; then
+		say_phase tdd "$issue_name produced no changes -- stopping rather than reviewing and committing nothing"
+		log "stopped: no changes produced for $issue_name"
+		break
+	fi
+
 	if ! make_test_gate "$issue_log"; then
 		say_phase gate "make test is failing after $issue_name -- stopping"
 		log "stopped: make test failed after $issue_name"
 		break
 	fi
 
-	commit_after="$(git rev-parse HEAD)"
-	if [ "$commit_before" = "$commit_after" ]; then
-		say "$issue_name produced no commit -- stopping rather than folding it into the next issue's"
-		log "stopped: no commit produced for $issue_name"
-		break
-	fi
-
-	if [ -n "$(git status --porcelain)" ]; then
-		say "uncommitted changes left over after $issue_name -- stopping"
-		log "stopped: dirty tree after $issue_name"
-		break
-	fi
-
-	completed=$((completed + 1))
-	say_ok loop "committed $issue_name as $(git rev-parse --short HEAD)"
-	log "committed $issue_name as $commit_after"
-
-	[ -n "$review" ] || continue
-
 	# --- review, in a context that didn't write the code -------------------
+	#
+	# Before the commit, not after it. A review that runs afterwards can only
+	# ever ask for an amendment, which means the queue and the history can
+	# disagree about whether an issue is done -- and they did: an issue that
+	# failed review twice went back to the queue while its commit stayed in
+	# the branch, so a later run built a second commit for the same issue.
+	# Nothing to back out if nothing was committed.
 
 	verdict_file="issues/reviews/$issue_slug.md"
 	attempt=1
 
-	while :; do
+	while [ -n "$review" ]; do
 		say_phase rev "reviewing $issue_name (attempt $attempt)"
 		rm -f "$verdict_file"
 
 		run_claude "Use the pj-review skill to review the implementation of
-issues/done/$issue_name, as committed in $commit_before..$(git rev-parse HEAD).
+issues/done/$issue_name. It is not committed: the work under review is the
+staged change, which 'git diff --cached' shows in full, including new files.
 
-Write your verdict to $verdict_file. Review only; do not change any code." \
+Write your verdict to $verdict_file. Review only; do not change any code, and
+do not commit -- this loop commits once you approve.$test_hint" \
 			"$run_dir/$issue_slug.review.log" rev || {
 			say_phase rev "claude exited non-zero while reviewing $issue_name -- stopping"
 			log "stopped: claude failed reviewing $issue_name"
@@ -513,30 +583,48 @@ Write your verdict to $verdict_file. Review only; do not change any code." \
 		case "$verdict" in
 			"Verdict: approved")
 				say_ok rev "approved"
+				say_verdict "$verdict_file" reviewed
 				break
 				;;
 			"Verdict: changes-requested")
+				say_bad rev "changes requested"
+				say_verdict "$verdict_file" findings
+
 				if [ "$attempt" -ge 2 ]; then
 					say_phase rev "still changes-requested after a remediation pass -- stopping for a human"
 					log "stopped: $issue_name unresolved after remediation"
 					# Back out of done/ so the queue reflects reality: this
 					# issue is not finished, and a later run must not skip it.
+					# The work itself stays staged in the tree, unreviewed and
+					# uncommitted, which is exactly what it is -- there is no
+					# commit to disown, because none was ever made.
 					mkdir -p issues
 					mv "issues/done/$issue_name" "issues/$issue_name"
+					say_phase rev "the work is left staged and uncommitted in the working tree; $verdict_file says what is wrong"
 					exit 1
 				fi
 
-				say_phase rev "changes requested -- one remediation pass"
+				say_phase rev "one remediation pass"
 				log "remediating $issue_name"
 
 				run_claude "The review in $verdict_file requested changes to your
-implementation of issues/done/$issue_name. Read it, address every finding, keep
-the test suite green, and amend your existing commit (do not add a second
-commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remediate.log" fix || {
+implementation of issues/done/$issue_name, which is staged but not committed.
+Read the review, address every finding, and keep the test suite green.
+
+Do not commit and do not push: this loop commits once the review passes.$test_hint" \
+					"$run_dir/$issue_slug.remediate.log" fix || {
 					say_phase fix "claude exited non-zero while remediating $issue_name -- stopping"
 					log "stopped: claude failed remediating $issue_name"
 					exit 1
 				}
+
+				if [ "$(git rev-parse HEAD)" != "$commit_before" ]; then
+					say_phase fix "the remediation committed despite the instruction not to -- rewinding"
+					log "rewound a premature commit while remediating $issue_name"
+					git reset --soft "$commit_before" >/dev/null
+				fi
+
+				git add -A
 
 				if ! make_test_gate "$issue_log"; then
 					say_phase gate "make test is failing after remediation -- stopping"
@@ -553,6 +641,51 @@ commit for the same issue). Do not push.$test_hint" "$run_dir/$issue_slug.remedi
 				;;
 		esac
 	done
+
+	# --- the commit, once nothing objects to it ----------------------------
+	#
+	# Made here rather than by the implementing agent, because "exactly one
+	# commit per issue" is the property that makes an unattended run reviewable
+	# one issue at a time, and it should not depend on an agent having followed
+	# an instruction. pj-commit still writes the message: a subject saying what
+	# changed and a body saying why is worth an agent, and a mechanical
+	# "Implement 003-slice" would not survive being read back in a month.
+	say_phase git "committing $issue_name"
+
+	run_claude "Use the pj-commit skill to make exactly one commit for the
+staged work implementing issues/done/$issue_name. It has already been
+implemented, tested and reviewed; your job is the commit and its message.
+
+Do not change any code. Do not push." \
+		"$run_dir/$issue_slug.commit.log" git || {
+		say_phase git "claude exited non-zero while committing $issue_name -- stopping"
+		log "stopped: claude failed committing $issue_name"
+		exit 1
+	}
+
+	new_commits="$(git rev-list --count "$commit_before"..HEAD)"
+
+	if [ "$new_commits" -eq 0 ]; then
+		say_phase git "$issue_name produced no commit -- stopping rather than folding it into the next issue's"
+		log "stopped: no commit produced for $issue_name"
+		exit 1
+	fi
+
+	if [ "$new_commits" -gt 1 ]; then
+		say_phase git "$issue_name produced $new_commits commits -- stopping, since one commit per issue is what makes this run reviewable"
+		log "stopped: $new_commits commits produced for $issue_name"
+		exit 1
+	fi
+
+	if [ -n "$(git status --porcelain)" ]; then
+		say_phase git "uncommitted changes left over after $issue_name -- stopping"
+		log "stopped: dirty tree after $issue_name"
+		exit 1
+	fi
+
+	completed=$((completed + 1))
+	say_ok loop "committed $issue_name as $(git rev-parse --short HEAD)"
+	log "committed $issue_name as $(git rev-parse HEAD)"
 done
 
 say_ok loop "done -- $completed issue(s) completed this run"

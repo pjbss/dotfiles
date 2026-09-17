@@ -35,8 +35,8 @@ mkdir -p "$stub_bin"
 # A stub `claude` that performs the mechanical part of what each prompt asks
 # for. $STUB_MODE steers it so each scenario below can be driven without a
 # model: "normal" completes the issue, "partial" leaves it in issues/ the way
-# pj-tdd does for a human-only criterion, "nocommit" does the work but never
-# commits.
+# pj-tdd does for a human-only criterion, "nochanges" closes the issue without
+# touching anything, and "eagercommit" commits despite being told not to.
 cat > "$stub_bin/claude" <<'STUB'
 #!/bin/sh
 set -eu
@@ -79,15 +79,35 @@ issue_file="issues/$issue_name"
 case "$prompt" in
 	*"pj-review skill"*)
 		mkdir -p issues/reviews
-		printf 'Verdict: %s\n\n## Findings\n\nstub review\n' "${STUB_VERDICT:-approved}" \
-			> "issues/reviews/${issue_name%.md}.md"
+		# Both sections, in the shape pj-review's SKILL.md specifies, so the
+		# tests can tell which of them the loop puts on the console.
+		cat > "issues/reviews/${issue_name%.md}.md" <<VERDICT
+Verdict: ${STUB_VERDICT:-approved}
+
+## Reviewed
+
+\`issues/$issue_name\`, \`make test\`: STUB_SUITE_PASSED
+
+## Findings
+
+1. **STUB_FINDING_LABEL** -- \`src/stub.sh:41\`
+   STUB_FINDING_DETAIL
+VERDICT
 		say_stub "stub: reviewed $issue_name -> ${STUB_VERDICT:-approved}"
+		;;
+
+	*"pj-commit skill"*)
+		git add -A
+		git commit -q -m "Implement ${issue_name%.md}
+
+Stub implementation.
+
+Issue: issues/$issue_name"
+		say_stub "stub: committed $issue_name"
 		;;
 
 	*"requested changes to your"*)
 		echo "remediated" >> "stub-work-${issue_name%.md}.txt"
-		git add -A
-		git commit -q --amend --no-edit
 		say_stub "stub: remediated $issue_name"
 		;;
 
@@ -97,11 +117,21 @@ case "$prompt" in
 				say_stub "stub: left $issue_name in issues/ for a human"
 				exit 0
 				;;
-			nocommit)
+			nochanges)
+				mkdir -p issues/done
+				mv "$issue_file" "issues/done/$issue_name"
+				say_stub "stub: closed $issue_name without changing anything"
+				exit 0
+				;;
+			eagercommit)
+				# An implementation that commits despite being told not to.
+				# The loop rewinds it rather than stranding the work.
 				echo "did work" >> "stub-work-${issue_name%.md}.txt"
 				mkdir -p issues/done
 				mv "$issue_file" "issues/done/$issue_name"
-				say_stub "stub: worked on $issue_name but made no commit"
+				git add -A
+				git commit -q -m "Premature ${issue_name%.md}"
+				say_stub "stub: committed $issue_name despite being asked not to"
 				exit 0
 				;;
 		esac
@@ -116,13 +146,7 @@ case "$prompt" in
 		echo "did work" >> "stub-work-${issue_name%.md}.txt"
 		mkdir -p issues/done
 		mv "$issue_file" "issues/done/$issue_name"
-		git add -A
-		git commit -q -m "Implement ${issue_name%.md}
-
-Stub implementation.
-
-Issue: issues/$issue_name"
-		say_stub "stub: implemented and committed $issue_name"
+		say_stub "stub: implemented $issue_name, left uncommitted"
 		;;
 esac
 STUB
@@ -276,6 +300,8 @@ assert_contains "$out" "Bash" "the agent's tool calls are rendered, not just its
 assert_contains "$out" "make test in" "the gate announces itself before running, so a slow suite doesn't look like a hang"
 assert_contains "$out" "pass" "a green gate says so on that same line"
 assert_contains "$out" "issues/prd.md" "a subagent's tool call is rendered too"
+assert_contains "$out" "STUB_SUITE_PASSED" \
+	"an approved verdict shows what the reviewer checked, including whether it ran the suite itself"
 assert_contains "$out" "↳" "a subagent's work is indented under the phase that spawned it"
 assert_not_contains "$out" '"type":"assistant"' \
 	"the console shows rendered lines, never the raw event stream"
@@ -291,6 +317,21 @@ assert_contains "$(cat "$run_dir/001-slice.log")" "Bash" \
 assert_not_contains "$(cat "$run_dir/001-slice.log")" '"type":"assistant"' \
 	"the rendered log isn't a second copy of the JSONL"
 assert_ok "each phase archives its own stream" test -f "$run_dir/001-slice.review.jsonl"
+
+# === review happens before the commit, not after it =========================
+
+# The property the whole arrangement rests on: a commit that no reviewer has
+# seen should never exist, not even briefly. Asserted on the order the phases
+# appear in the console, which is the only place the sequence is observable.
+repo="$(make_repo ordering 1)"
+run_loop "$repo"
+assert_exit_code 0 "$rc" "the ordering fixture runs clean"
+review_line="$(printf '%s\n' "$out" | grep -n "reviewing 001-slice.md" | head -1 | cut -d: -f1)"
+commit_line="$(printf '%s\n' "$out" | grep -n "committing 001-slice.md" | head -1 | cut -d: -f1)"
+assert_ok "the review is reported before the commit is made" \
+	test "$review_line" -lt "$commit_line"
+assert_contains "$(cat "$repo/stub-call-001-slice.txt")" "Do not commit" \
+	"the implementing agent is told to leave its work uncommitted"
 
 # === --max-issues ===========================================================
 
@@ -310,14 +351,32 @@ assert_contains "$out" "left it for a human" "the run says the issue needs a hum
 assert_ok "the unfinished issue stays in issues/, not done/" test -f "$repo/issues/001-slice.md"
 assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "no commit is made for an unfinished issue"
 
-# === an issue that produced no commit =======================================
+# === an issue that changed nothing ==========================================
 
-repo="$(make_repo nocommit 2)"
-STUB_MODE=nocommit run_loop "$repo"
+repo="$(make_repo nochanges 2)"
+STUB_MODE=nochanges run_loop "$repo"
 unset STUB_MODE
-assert_contains "$out" "produced no commit" "a missing commit stops the run"
-assert_contains "$out" "next issue" "the message explains the risk of folding work into a later commit"
-assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "nothing is committed when the implementation step didn't commit"
+assert_contains "$out" "produced no changes" "an issue that changed nothing stops the run"
+assert_contains "$out" "committing nothing" "the message says why that is worth stopping for"
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "nothing is committed when nothing was built"
+assert_not_ok "there is nothing to review, so no reviewer is spent on it" \
+	test -d "$repo/issues/reviews"
+
+# === an implementation that commits anyway ==================================
+
+# The instruction not to commit is an instruction to an agent, so the loop has
+# to hold whether or not it was followed. Rewound rather than refused: the work
+# is all still there, and stranding a finished issue would be the worse answer.
+repo="$(make_repo eagercommit 1)"
+STUB_MODE=eagercommit run_loop "$repo"
+unset STUB_MODE
+assert_exit_code 0 "$rc" "a premature commit doesn't fail the run"
+assert_contains "$out" "rewinding" "the loop says it rewound the premature commit"
+assert_contains "$out" "reviewing" "the rewound work is reviewed like any other"
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" \
+	"the issue still ends up as exactly one commit"
+assert_contains "$(git -C "$repo" log --format=%s -1)" "Implement 001-slice" \
+	"and it is the reviewed commit this loop made, not the premature one"
 
 # === review requesting changes it never gets ================================
 
@@ -331,6 +390,22 @@ assert_ok "the unresolved issue is moved back out of done/ so a later run doesn'
 	test -f "$repo/issues/001-slice.md"
 assert_not_ok "the unresolved issue is no longer marked done" test -f "$repo/issues/done/001-slice.md"
 assert_not_ok "the blocked follow-on issue was never started" test -f "$repo/stub-work-002-slice.txt"
+
+# The findings are the substance of the review. Printing only the verdict made
+# an enforced review look like a skipped one, and left no way to judge whether
+# the remediation pass had addressed what was actually wrong.
+assert_contains "$out" "STUB_FINDING_LABEL" "a changes-requested verdict puts its findings on the console"
+assert_contains "$out" "STUB_FINDING_DETAIL" "including the detail under each finding, not just its heading"
+assert_contains "$out" "↳" "the findings are printed subordinate to the verdict line"
+
+# Nothing unreviewed is ever committed, so an issue the review never cleared
+# leaves the history untouched -- the queue and the branch cannot disagree.
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" \
+	"work the review never approved is never committed"
+assert_contains "$out" "left staged and uncommitted" \
+	"the run says where the unapproved work actually is"
+assert_ok "and it really is still there, rather than discarded" \
+	bash -c "cd '$repo' && ! git diff --cached --quiet"
 
 # === --no-review ============================================================
 
@@ -422,7 +497,7 @@ assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-
 repo="$(make_repo plain 1)"
 run_loop "$repo" --plain
 assert_exit_code 0 "$rc" "--plain exits 0"
-assert_contains "$out" "stub: implemented and committed" "--plain prints the agent's final message"
+assert_contains "$out" "stub: implemented" "--plain prints the agent's final message"
 assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "--plain still commits the work"
 plain_run_dir="$(ls -d "$repo/issues/runs/"*/ | head -1)"
 assert_not_ok "--plain archives no event stream, because there wasn't one" \

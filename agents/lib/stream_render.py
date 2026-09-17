@@ -13,7 +13,7 @@ actually re-read the code. So the loop asks for the event stream instead, and
 this turns it back into something a human can follow.
 
 Every line carries the label of the agent that produced it (`tdd`, `rev`,
-`fix`), so three phases scrolling past in one terminal stay distinguishable
+`fix`, `git`), so three phases scrolling past in one terminal stay distinguishable
 after the fact, not just while you remember which one you started. Events with
 a `parent_tool_use_id` came from a subagent the phase spawned -- pj-tdd's
 pj-test-auditor, say -- and are indented under it rather than flattened in,
@@ -58,6 +58,7 @@ LABEL_COLORS = {
     "rev": "\033[35m",      # magenta
     "fix": "\033[33m",      # yellow
     "gate": "\033[34m",     # blue
+    "git": "\033[1m",       # bold
     "loop": "\033[36m",     # cyan
 }
 DIM = "\033[2m"

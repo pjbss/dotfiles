@@ -199,16 +199,22 @@ where you find out. Then let it drain:
 
     $ pj-run-issues
 
-Per issue it implements test-first via `pj-tdd`, runs `make test`, commits via
-`pj-commit`, and reviews the commit with `pj-review` in a separate process. It
-stops at the first thing that isn't clean rather than building on top of it --
-a red suite, an issue `pj-tdd` left for a human, a missing commit, or a second
-`changes-requested`.
+Per issue it implements test-first via `pj-tdd`, runs `make test`, reviews the
+work with `pj-review` in a separate process, and commits it via `pj-commit`
+only once that review approves. It stops at the first thing that isn't clean
+rather than building on top of it -- a red suite, an issue `pj-tdd` left for a
+human, an issue that changed nothing, or a second `changes-requested`.
+
+Nothing is committed before it has been reviewed. The implementing agent leaves
+its work in the working tree; the loop stages it, gates it, has it reviewed, and
+makes the commit itself. So an issue the review never clears leaves the branch
+untouched, and the queue and the history can't disagree about what is done.
 
 It prints what it is doing while it does it, one line per tool call, each
 labeled with the agent that produced it -- `tdd` while `pj-tdd` implements,
 `rev` while the reviewer reads, `fix` during a remediation pass, `gate` for
-`make test`, `loop` for the loop's own decisions:
+`make test`, `git` while `pj-commit` writes the commit, `loop` for the loop's
+own decisions:
 
     17:02:11 tdd  ▸ Read   issues/003-csv-export.md
     17:02:19 tdd  ▸ Bash   make test
@@ -217,13 +223,26 @@ labeled with the agent that produced it -- `tdd` while `pj-tdd` implements,
     17:02:58 tdd    ↳ Read   test/csv_export_test.sh
     17:03:10 tdd  ✓ finished  4m12s  $0.41
     17:03:10 gate ▸ make test in . ... pass
-    17:03:39 rev  · Verdict: approved
-    17:03:40 loop ✓ committed 003-csv-export.md as a1b2c3d
+    17:03:12 rev  ▸ reviewing 003-csv-export.md (attempt 1)
+    17:03:39 rev  ✗ changes requested
+    17:03:39 rev    ↳ 1. **Unsupported claim** -- `src/export.sh:41`
+    17:03:39 rev    ↳    Criterion 2 is checked, but no test covers empty input.
+    17:03:39 rev  ▸ one remediation pass
+    17:04:30 fix  ▸ Edit   test/csv_export_test.sh
+    17:04:51 gate ▸ make test in . ... pass
+    17:04:52 rev  ▸ reviewing 003-csv-export.md (attempt 2)
+    17:05:20 rev  ✓ approved
+    17:05:20 rev    ↳ `issues/003-csv-export.md`, `make test`: passed
+    17:05:21 git  ▸ committing 003-csv-export.md
+    17:05:44 loop ✓ committed 003-csv-export.md as a1b2c3d
 
-Work a phase did through a subagent is indented under it, because "the
-implementer checked its own tests" and "a separate auditor checked them" are
-different claims. An unattended run you can't see is one you can't tell from a
-hung one, which is the whole reason this is here.
+The review's findings are printed, not just its verdict: a review whose
+substance lives only in `issues/reviews/` is indistinguishable from one that
+never ran, and you need them to judge whether the remediation pass addressed
+what was actually wrong. Work a phase did through a subagent is indented under
+it, because "the implementer checked its own tests" and "a separate auditor
+checked them" are different claims. An unattended run you can't see is one you
+can't tell from a hung one, which is the whole reason this is here.
 
 Logs land in `issues/runs/<timestamp>/`, two per phase: `<issue>.log` is those
 same lines without the color, and `<issue>.jsonl` is claude's untouched event
@@ -388,11 +407,21 @@ it in their head. Nothing is cached: the filesystem stays the source of truth.
 
 `pj-run-issues` (run inside the VM, or dispatched into it by `pj-sbx-run`) then
 drains the ready queue. Per issue: implement it test-first via `pj-tdd`, run
-`make test`, commit it via `pj-commit`, then review it with `pj-review` in a
-**separate** `claude -p` process -- a reviewer sharing context with the author
-has already been told why every decision was right, and reliably agrees. A
-`changes-requested` verdict gets exactly one remediation pass before the loop
-stops for a human.
+`make test`, review it with `pj-review` in a **separate** `claude -p` process --
+a reviewer sharing context with the author has already been told why every
+decision was right, and reliably agrees -- and only then commit it via
+`pj-commit`. A `changes-requested` verdict gets exactly one remediation pass
+before the loop stops for a human.
+
+The commit comes last on purpose. Reviewing afterwards means a review can only
+ever ask for an amendment, so an issue that failed review twice went back onto
+the queue while its commit stayed in the branch, and the next run built a second
+commit for the same issue -- breaking the one-commit-per-issue property the
+whole arrangement rests on. Nothing to disown if nothing was committed. The
+commit is made by `pj-commit` in its own process rather than by the implementing
+agent, so "exactly one commit per issue" doesn't depend on an agent having
+followed an instruction; an implementation that commits anyway is rewound into
+the working tree rather than refused.
 
 Each of those processes is asked for its event stream rather than its final
 message, and `agents/lib/stream_render.py` turns that back into one labeled
