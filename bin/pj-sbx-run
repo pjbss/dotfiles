@@ -59,6 +59,22 @@ if [ -z "$task_name" ]; then
 fi
 shift
 
+# ssh hands the guest one string for its shell to re-split, so each argument is
+# quoted as it's collected -- otherwise `--test-cmd 'make -C backend test'`
+# arrives as four words, and any `$` is expanded in the guest. Arguments made
+# only of shell-safe characters are left bare, so the common single-word flags
+# read on the far end exactly as typed.
+remote_quote() {
+	case "$1" in
+		'' | *[!A-Za-z0-9_./=:,+@%-]*)
+			printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+			;;
+		*)
+			printf '%s' "$1"
+			;;
+	esac
+}
+
 # Rebuilt rather than passed through as "$@", because --project-dir is this
 # command's own and must not reach pj-run-issues, which would reject it.
 project_dir="/workspace"
@@ -74,7 +90,7 @@ while [ $# -gt 0 ]; do
 			shift 2
 			;;
 		*)
-			loop_args="$loop_args $1"
+			loop_args="$loop_args $(remote_quote "$1")"
 			shift
 			;;
 	esac

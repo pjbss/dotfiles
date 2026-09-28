@@ -45,6 +45,8 @@ mkdir -p "$stub_bin"
 cat > "$stub_bin/ssh" <<STUB
 #!/bin/sh
 printf '%s\n' "\$*" > "$fixture_root/ssh-invocation"
+for remote_cmd in "\$@"; do :; done
+printf '%s' "\$remote_cmd" > "$fixture_root/ssh-remote-cmd"
 [ -n "\${STUB_SSH_TAMPER:-}" ] && printf '#!/bin/sh\nexit 0\n' > "$gitdir/hooks/pre-push"
 exit "\${STUB_SSH_STATUS:-0}"
 STUB
@@ -65,6 +67,9 @@ run_sbx_run() {
 run_sbx_run --help
 assert_exit_code 0 "$rc" "pj-sbx-run --help exits 0"
 assert_contains "$out" "Usage: pj-sbx-run" "pj-sbx-run --help prints its header comment as usage"
+assert_contains "$out" "--test-cmd" "--help names --test-cmd among the pass-through arguments"
+assert_not_contains "$out" "--test-dir" "--help no longer mentions --test-dir"
+assert_not_ok "the script's own header no longer mentions --test-dir" grep -q -- '--test-dir' "$SBX_RUN"
 
 run_sbx_run
 assert_exit_code 1 "$rc" "pj-sbx-run with no task name exits 1"
@@ -114,6 +119,45 @@ assert_contains "$invocation" "cd '/elsewhere'" "an absolute --project-dir is us
 run_sbx_run some-task --project-dir
 assert_exit_code 1 "$rc" "--project-dir with no value is refused"
 assert_contains "$out" "needs a directory" "the refusal says what --project-dir wants"
+
+# --- arguments survive the hop to the remote shell ---
+
+# ssh hands the guest a single string for its shell to re-split, so what matters
+# is the argument vector pj-run-issues ends up with, not how the string looks.
+# Replay the recorded remote command through a real sh, with the `cd` prefix
+# dropped and a stub pj-run-issues that prints each argument it receives on its
+# own line.
+remote_bin="$fixture_root/remote-bin"
+mkdir -p "$remote_bin"
+cat > "$remote_bin/pj-run-issues" <<'STUB'
+#!/bin/sh
+for arg in "$@"; do printf '[%s]\n' "$arg"; done
+STUB
+chmod +x "$remote_bin/pj-run-issues"
+
+remote_argv() {
+	remote_cmd="$(cat "$fixture_root/ssh-remote-cmd")"
+	PATH="$remote_bin:$PATH" sh -c "${remote_cmd#*&& }"
+}
+
+run_sbx_run some-task --test-cmd 'make -C backend test'
+assert_exit_code 0 "$rc" "a multi-word --test-cmd runs"
+assert_eq "$(printf '[--test-cmd]\n[make -C backend test]')" "$(remote_argv)" \
+	"a multi-word --test-cmd reaches pj-run-issues as a single argument"
+
+run_sbx_run some-task --test-cmd "sh -c 'make test'"
+assert_eq "$(printf "[--test-cmd]\n[sh -c 'make test']")" "$(remote_argv)" \
+	"an argument containing single quotes survives the hop unmangled"
+
+run_sbx_run some-task --test-cmd 'echo $HOME `id` $(id)'
+assert_eq "$(printf '[--test-cmd]\n[echo $HOME `id` $(id)]')" "$(remote_argv)" \
+	"an argument containing \$ reaches the far end literally, unexpanded"
+
+run_sbx_run some-task --project-dir app --no-review --max-issues 3
+assert_eq "$(printf '[--no-review]\n[--max-issues]\n[3]')" "$(remote_argv)" \
+	"single-word arguments still forward as separate words, without --project-dir"
+assert_contains "$(cat "$fixture_root/ssh-invocation")" "pj-run-issues --no-review --max-issues 3" \
+	"single-word arguments are forwarded exactly as before, unquoted"
 
 # --- the loop's exit status is preserved ---
 
