@@ -27,6 +27,12 @@ SESSION_START="$HOOKS_DIR/pj-hook-session-start.sh"
 VERIFY_EDIT="$HOOKS_DIR/pj-hook-verify-edit.sh"
 STOP_TESTS="$HOOKS_DIR/pj-hook-stop-tests.sh"
 
+# The stop-gate cases below each set exactly the PJ_* variables they mean to
+# test. Anything inherited would leak into the ones that don't -- and under
+# pj-run-issues PJ_TEST_DIR is this very repo, so the hook would run this suite
+# from inside itself, recursing without end.
+unset PJ_STOP_TESTS PJ_TEST_DIR PJ_TEST_CMD PJ_PROJECT_ROOT
+
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
 
@@ -232,5 +238,72 @@ if out="$(printf '%s' "$pass_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$fixture_ro
 	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "an unreachable PJ_TEST_DIR skips rather than running some other project's suite"
 assert_eq "" "$out" "the skip is silent"
+
+# PJ_TEST_CMD is the primary gate: a command rather than a directory, so the
+# loop can hand the hook one that spans several packages. Only stderr is
+# captured here, since that is the channel Claude Code hands back to the model.
+cmd_root="$fixture_root/cmd-root"
+mkdir -p "$cmd_root"
+cmd_payload="$(python3 -c '
+import json, sys
+print(json.dumps({"cwd": sys.argv[1]}))' "$cmd_root")"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='echo "cmd-boom"; exit 1' \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1 >/dev/null)"; then rc=0; else rc=$?; fi
+assert_exit_code 2 "$rc" "a failing PJ_TEST_CMD blocks stopping"
+assert_contains "$out" "cmd-boom" "the failing command's own output comes back on stderr"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='echo "cmd-boom"; exit 1' \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "a second consecutive PJ_TEST_CMD failure lets the session stop rather than looping"
+assert_contains "$out" "still failing" "the PJ_TEST_CMD give-up message still says the gate is red"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='true' \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "a passing PJ_TEST_CMD lets the session stop"
+assert_eq "" "$out" "a passing PJ_TEST_CMD is silent"
+
+# Each case reports its working directory by failing with it, since only a
+# failure's output comes back. `pwd -P` because TMPDIR on macOS is a symlink.
+elsewhere="$fixture_root/elsewhere"
+mkdir -p "$elsewhere"
+real_cmd_root="$(cd -P "$cmd_root" && pwd)"
+real_elsewhere="$(cd -P "$elsewhere" && pwd)"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='echo "ran-in:$(pwd -P)"; exit 1' \
+	PJ_PROJECT_ROOT="$elsewhere" TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 2 "$rc" "a PJ_TEST_CMD reporting its directory fails as written"
+assert_contains "$out" "ran-in:$real_elsewhere" "PJ_TEST_CMD runs from PJ_PROJECT_ROOT, not the session's cwd"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='echo "ran-in:$(pwd -P)"; exit 1' \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 2 "$rc" "a PJ_TEST_CMD with no PJ_PROJECT_ROOT still gates"
+assert_contains "$out" "ran-in:$real_cmd_root" "PJ_TEST_CMD with no PJ_PROJECT_ROOT runs from the session's cwd"
+
+ran_marker="$fixture_root/cmd-ran"
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD="touch '$ran_marker'; exit 1" \
+	PJ_PROJECT_ROOT="$fixture_root/absent" TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "an unreachable PJ_PROJECT_ROOT skips rather than running the command elsewhere"
+assert_eq "" "$out" "the PJ_PROJECT_ROOT skip is silent"
+if [ -e "$ran_marker" ]; then ran=yes; else ran=no; fi
+assert_eq "no" "$ran" "the command never ran at all when PJ_PROJECT_ROOT is unreachable"
+
+if out="$(printf '%s' "$pass_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$failing_project" \
+	PJ_TEST_CMD='true' TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "PJ_TEST_CMD takes precedence over PJ_TEST_DIR when both are set"
+assert_eq "" "$out" "the PJ_TEST_DIR suite is never run when PJ_TEST_CMD is set"
+
+multi_project="$fixture_root/multi"
+mkdir -p "$multi_project/backend"
+printf 'test:\n\t@echo "backend-suite-ran"; exit 1\n' > "$multi_project/backend/Makefile"
+if out="$(printf '%s' "$cmd_payload" | PJ_STOP_TESTS=1 PJ_TEST_CMD='make -C backend test' \
+	PJ_PROJECT_ROOT="$multi_project" TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 2 "$rc" "a multi-word PJ_TEST_CMD runs as written"
+assert_contains "$out" "backend-suite-ran" "the multi-word command reached the subproject's suite"
+
+if out="$(printf '%s' "$cmd_payload" | PJ_TEST_CMD='echo "cmd-boom"; exit 1' \
+	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "without PJ_STOP_TESTS a failing PJ_TEST_CMD does nothing"
+assert_eq "" "$out" "without PJ_STOP_TESTS the hook is silent whatever PJ_TEST_CMD says"
 
 assert_report

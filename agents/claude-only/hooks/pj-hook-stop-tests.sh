@@ -1,7 +1,7 @@
 #!/bin/sh
 # pj-hook-stop-tests.sh
 #
-# Stop hook. Refuses to let a session finish while `make test` is red: exit 2
+# Stop hook. Refuses to let a session finish while the test gate is red: exit 2
 # prevents the stop and hands the failure output back to the model, so it keeps
 # working instead of reporting done over a broken suite.
 #
@@ -15,14 +15,16 @@
 # down -- or one unrelated to what they just asked about -- is how a safety gate
 # earns itself a permanent `disableAllHooks`.
 #
-# The suite is the one in PJ_TEST_DIR when pj-run-issues set it, and otherwise
-# the one in the session's own working directory. Those differ in a monorepo,
-# where the agent works from the project root but the Makefile belongs to a
-# subproject -- and without PJ_TEST_DIR the hook would find no Makefile there
-# and skip, quietly leaving an unattended run with no gate at all.
+# The gate is PJ_TEST_CMD: a command, run with `sh -c` from PJ_PROJECT_ROOT (or
+# the session's own working directory when that isn't set). A command rather
+# than a directory is what lets one gate span several packages of a monorepo,
+# e.g. `make -C backend test && make -C frontend test`. A PJ_PROJECT_ROOT that
+# doesn't exist skips the gate rather than running the command somewhere else.
 #
-# A project with no `make test` target is silently skipped rather than treated
-# as passing or failing, since this hook is synced to every project.
+# Without PJ_TEST_CMD, the older form still works: `make test` in PJ_TEST_DIR,
+# or in the session's working directory. A project with no `make test` target
+# is then silently skipped rather than treated as passing or failing, since
+# this hook is synced to every project.
 
 set -eu
 
@@ -36,15 +38,23 @@ except Exception:
     print("")
 ' 2>/dev/null || true)"
 
-gate_dir="${PJ_TEST_DIR:-$cwd}"
+if [ -n "${PJ_TEST_CMD:-}" ]; then
+	gate_dir="${PJ_PROJECT_ROOT:-$cwd}"
+	gate_cmd="$PJ_TEST_CMD"
+else
+	gate_dir="${PJ_TEST_DIR:-$cwd}"
+	gate_cmd="make test"
+fi
 
 # Skipping beats falling back to whatever directory this hook happens to have
-# been started in: a `make test` run against the wrong project would gate the
-# session on a suite that never sees the code it wrote.
+# been started in: a gate run against the wrong project would gate the session
+# on a suite that never sees the code it wrote.
 [ -z "$gate_dir" ] || cd "$gate_dir" 2>/dev/null || exit 0
 
-[ -f Makefile ] || exit 0
-grep -q '^test:' Makefile 2>/dev/null || exit 0
+if [ -z "${PJ_TEST_CMD:-}" ]; then
+	[ -f Makefile ] || exit 0
+	grep -q '^test:' Makefile 2>/dev/null || exit 0
+fi
 
 # Guards against a Stop hook that re-runs the suite on the model's own
 # post-failure stop, over and over. One retry is the useful amount: it gives
@@ -52,21 +62,21 @@ grep -q '^test:' Makefile 2>/dev/null || exit 0
 # unfixable failure spin.
 attempt_marker="${TMPDIR:-/tmp}/pj-stop-tests-$(printf '%s' "$gate_dir" | tr -c 'A-Za-z0-9' '-')"
 
-if output="$(make test 2>&1)"; then
+if output="$(sh -c "$gate_cmd" 2>&1)"; then
 	rm -f "$attempt_marker"
 	exit 0
 fi
 
 if [ -f "$attempt_marker" ]; then
 	rm -f "$attempt_marker"
-	echo "pj-hook-stop-tests: 'make test' is still failing after a retry -- letting the session stop so this doesn't loop. The suite is RED; do not treat this work as finished." >&2
+	echo "pj-hook-stop-tests: '$gate_cmd' is still failing after a retry -- letting the session stop so this doesn't loop. The suite is RED; do not treat this work as finished." >&2
 	exit 0
 fi
 
 : > "$attempt_marker"
 
 {
-	echo "pj-hook-stop-tests: 'make test' is failing -- not finishing yet."
+	echo "pj-hook-stop-tests: '$gate_cmd' is failing -- not finishing yet."
 	echo
 	printf '%s\n' "$output" | tail -40
 	echo
