@@ -35,7 +35,8 @@
 #
 #   --max-issues N  Stop after N issues (default: drain the queue).
 #   --test-cmd CMD  Command that gates the run, run with `sh -c` from the
-#                   project root (default: discovered, see below).
+#                   project root (default: .pj/test, else discovered, see
+#                   below).
 #   --no-review     Skip the review pass. For a first smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
@@ -67,10 +68,17 @@
 # resolve, while in a monorepo the Makefile belongs to one subproject further
 # down -- so the command can reach wherever the suite is, e.g.
 # `make -C backend test`, or several suites joined with `&&`. The loop never
-# needs to know what a package is. Without --test-cmd, the gate is `make test`
-# when the project root has a `test` target, and otherwise the tree below it is
-# searched for one, giving `make -C <dir> test` -- finding several is refused
-# rather than guessed at, since picking the wrong suite would mean an
+# needs to know what a package is. The gate is the first of these that applies:
+#
+#   1. --test-cmd CMD, which wins over everything
+#   2. ./.pj/test, an executable script the project commits at its root
+#   3. `make test`, when the project root has a `test` target
+#   4. `make -C <dir> test`, when exactly one is found in the tree below
+#   5. none of those: refused
+#
+# .pj/test is what a monorepo commits so it stops needing the flag on every
+# run. One that exists but isn't executable is refused, not skipped, and so are
+# several candidates for arm 4 -- falling through or guessing would mean an
 # unattended run gated on tests that never touch the code it wrote.
 #
 # Refuses to run outside a spawned sandbox unless --force. This is an
@@ -278,6 +286,11 @@ has_test_target() {
 
 if [ -n "$test_cmd" ]; then
 	: # named explicitly -- run as given, since only running it can check it
+elif [ -e .pj/test ]; then
+	# Refused rather than skipped: falling through to `make test` would gate
+	# the run on a suite the project deliberately named something else over.
+	[ -x .pj/test ] || fail ".pj/test exists but isn't executable -- run 'chmod +x .pj/test' (and commit it) so it can gate this run. It is not skipped in favor of 'make test', since that would gate the run on a suite this project didn't choose."
+	test_cmd="./.pj/test"
 elif has_test_target .; then
 	test_cmd="make test"
 else
@@ -305,11 +318,11 @@ else
 	CANDIDATES
 
 	if [ "$found" -eq 0 ]; then
-		fail "no Makefile with a 'test' target under $project_root -- without --test-cmd, a 'make test' target is the only gate this loop can find for itself. Pass --test-cmd CMD to name the command that gates this run."
+		fail "no .pj/test and no 'make test' target under $project_root, so there is nothing to gate this run on. Commit an executable .pj/test at the project root to say what the gate is, or pass --test-cmd CMD to name it for this one run."
 	fi
 
 	if [ "$found" -gt 1 ]; then
-		fail "several 'make test' targets under $project_root -- pass --test-cmd to say which one gates this run:
+		fail "several 'make test' targets under $project_root -- commit an executable .pj/test at the project root that runs the one that gates this work, or pass --test-cmd to name it for this one run:
 $(printf '%s' "$discovered" | sed 's|^|  |')"
 	fi
 

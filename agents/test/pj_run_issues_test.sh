@@ -266,6 +266,9 @@ mv "$repo/Makefile" "$repo/Makefile.hidden"
 run_loop "$repo"
 assert_exit_code 1 "$rc" "refuses when the project has no Makefile"
 assert_contains "$out" "make test" "the missing-Makefile refusal names the contract it needs"
+assert_contains "$out" "executable .pj/test" "the missing-Makefile refusal names .pj/test as a way to supply a gate"
+assert_ok "and names it before the flag" \
+	sh -c 'case "$1" in *.pj/test*--test-cmd*) exit 0 ;; *) exit 1 ;; esac' _ "$out"
 mv "$repo/Makefile.hidden" "$repo/Makefile"
 
 python3 - "$repo/issues/001-slice.md" <<'PYEOF'
@@ -524,6 +527,10 @@ assert_exit_code 1 "$rc" "two candidate suites are refused rather than guessed b
 assert_contains "$out" "--test-cmd" "the ambiguity refusal names the flag that resolves it"
 assert_contains "$out" "backend" "the ambiguity refusal lists the candidates it found"
 assert_contains "$out" "frontend" "the ambiguity refusal lists all of them"
+assert_contains "$out" "commit an executable .pj/test" \
+	"the ambiguity refusal names .pj/test as the fix that survives being retyped"
+assert_ok "and names it before the flag" \
+	sh -c 'case "$1" in *.pj/test*--test-cmd*) exit 0 ;; *) exit 1 ;; esac' _ "$out"
 
 run_loop "$project" --test-cmd 'make -C backend test'
 assert_exit_code 0 "$rc" "--test-cmd resolves the ambiguity"
@@ -546,6 +553,77 @@ assert_contains "$out" "CMD_TAIL_LINE" "the red command's output tail is printed
 assert_not_ok "the review never runs over a red gate" test -f "$project/issues/reviews/001-slice.md"
 assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"
 
+# === a project-owned .pj/test ===============================================
+
+# add_pj_test PROJECT BODY [MODE] -- commit BODY as PROJECT/.pj/test, executable
+# unless MODE says otherwise. Committed, because the loop refuses a dirty tree.
+add_pj_test() {
+	mkdir -p "$1/.pj"
+	printf '#!/bin/sh\n%s\n' "$2" > "$1/.pj/test"
+	chmod "${3:-755}" "$1/.pj/test"
+	git -C "$1" add -A
+	git -C "$1" commit -q -m "add .pj/test"
+}
+
+project="$(make_repo pjtest 1 "" backend)"
+add_pj_test "$project" 'echo PJ_TEST_RAN >> pj-test-runs.txt'
+run_loop "$project"
+assert_exit_code 0 "$rc" "an executable .pj/test gates the run with no flag passed"
+assert_contains "$(cat "$project/pj-test-runs.txt" 2>/dev/null)" "PJ_TEST_RAN" \
+	"the gate really ran .pj/test"
+
+# A root target that would also pass, so only the record of what ran tells the
+# two apart.
+project="$(make_repo pjtestroot 1)"
+add_pj_test "$project" 'echo PJ_TEST_RAN >> pj-test-runs.txt'
+run_loop "$project"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=./.pj/test" \
+	".pj/test wins over a root 'make test' target"
+
+project="$(make_repo pjtestflag 1)"
+add_pj_test "$project" 'echo PJ_TEST_RAN >> pj-test-runs.txt'
+run_loop "$project" --test-cmd 'make test'
+assert_exit_code 0 "$rc" "--test-cmd alongside a .pj/test runs clean"
+assert_not_ok "--test-cmd wins over .pj/test" test -f "$project/pj-test-runs.txt"
+
+# Invoked from the project root as ./.pj/test, so it reports the root rather
+# than .pj/.
+project="$(make_repo pjtestcwd 1 "" backend)"
+add_pj_test "$project" 'pwd -P > gate-cwd.txt'
+run_loop "$project"
+assert_eq "$(cd "$project" && pwd -P)" "$(cat "$project/gate-cwd.txt" 2>/dev/null)" \
+	".pj/test runs with the project root as its working directory"
+
+project="$(make_repo pjtestred 2 "" backend)"
+add_pj_test "$project" 'echo PJ_TEST_TAIL_LINE; exit 4'
+run_loop "$project"
+assert_contains "$out" "'./.pj/test' is failing" "a red .pj/test stops the run"
+assert_contains "$out" "PJ_TEST_TAIL_LINE" "the red .pj/test's output tail is printed"
+assert_not_ok "the review never runs over a red .pj/test" test -f "$project/issues/reviews/001-slice.md"
+assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"
+
+project="$(make_repo pjtestenv 1)"
+add_pj_test "$project" 'true'
+env_log="$fixture_root/pjtestenv-env.log"
+STUB_ENV_LOG="$env_log" STUB_VERDICT=changes-requested run_loop "$project"
+assert_contains "$out" "gating on './.pj/test'" "the run announces that it is gating on .pj/test"
+for call in tdd review remediate; do
+	assert_contains "$(cat "$env_log")" "$call PJ_TEST_DIR=unset PJ_TEST_CMD=./.pj/test PJ_PROJECT_ROOT=$project" \
+		"the $call invocation hands the Stop hook the .pj/test invocation"
+done
+assert_ok "and that invocation works when run the way the hook runs it" \
+	sh -c "cd '$project' && ./.pj/test"
+
+# Falling through to the root target here would gate the run on the wrong suite
+# -- the failure this ordering exists to prevent.
+project="$(make_repo pjtestnoexec 1)"
+add_pj_test "$project" 'echo PJ_TEST_RAN >> pj-test-runs.txt' 644
+run_loop "$project"
+assert_exit_code 1 "$rc" "a .pj/test that isn't executable is refused"
+assert_contains "$out" "chmod +x" "the refusal says to make it executable"
+assert_not_ok "it doesn't fall through to 'make test' and start work" \
+	test -f "$project/stub-call-001-slice.txt"
+
 project="$(make_repo badtestcmd 1)"
 run_loop "$project" --test-cmd
 assert_exit_code 1 "$rc" "--test-cmd with no value is refused instead of crashing the shell"
@@ -563,6 +641,8 @@ out="$("$RUN_ISSUES" --help 2>&1)"
 assert_contains "$out" "--test-cmd" "--help describes --test-cmd"
 assert_not_contains "$out" "--test-dir" "--help no longer mentions --test-dir"
 assert_not_ok "the script's own header no longer mentions --test-dir" grep -q -- '--test-dir' "$RUN_ISSUES"
+assert_contains "$out" ".pj/test" "--help describes .pj/test as part of the resolution order"
+assert_contains "$(cat "$DOTFILES_HOME/README")" ".pj/test" "the README describes .pj/test too"
 
 # === a red suite in the subdirectory stops the run ==========================
 

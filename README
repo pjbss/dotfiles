@@ -268,14 +268,28 @@ monorepo those aren't the same thing, and the repo root has neither this
 project's issues nor its tests. The gate is a command, always run from that
 directory: issues and the PRD sit at the project root because that's where the
 paths written in them resolve, while the Makefile may belong to one subproject
-further down, and a command can reach it there. With no flag it's `make test`
-when the project root has that target, or `make -C <dir> test` when there's
-exactly one below it; otherwise you name it:
+further down, and a command can reach it there. The gate is the first of these
+that applies:
+
+1. `--test-cmd CMD`, which wins over everything
+2. `./.pj/test`, an executable script the project commits at its root
+3. `make test`, when the project root has that target
+4. `make -C <dir> test`, when there's exactly one below it
+5. none of those: the run is refused
+
+A monorepo commits a `.pj/test` once instead of retyping the flag every run:
+
+    $ mkdir -p .pj && printf '#!/bin/sh\nexec make -C sparkwatch/backend test\n' > .pj/test
+    $ chmod +x .pj/test
+
+or names the command for a single run:
 
     $ pj-run-issues --test-cmd 'make -C sparkwatch/backend test'
 
-Refusing to guess between several is deliberate -- gating an unattended run on
-a suite that never sees the code it wrote is the same as not gating it at all.
+A `.pj/test` that isn't executable is refused rather than skipped, and so is
+finding several `make test` targets -- falling through or guessing would gate
+an unattended run on a suite that never sees the code it wrote, which is the
+same as not gating it at all.
 
 A full queue takes a while, so start it under `tmux` if you don't want to hold
 the ssh session open for it.
@@ -461,9 +475,9 @@ environment it hands its children, even in a VM that was spawned with
 credentials. It refuses to run outside a sandbox at all without `--force`.
 
 The gate has to actually be pointed at something for any of that to hold. The
-loop resolves the command once -- `make test` for the project root's own
-target, `make -C <dir> test` for a single one found below it, or whatever
-`--test-cmd` says -- and passes it to its children as `PJ_TEST_CMD`, with the
+loop resolves the command once -- whatever `--test-cmd` says, the project's
+own `./.pj/test`, `make test` for the project root's own target, or
+`make -C <dir> test` for a single one found below it -- and passes it to its children as `PJ_TEST_CMD`, with the
 project root as `PJ_PROJECT_ROOT`, which is what the `Stop` hook gates on.
 Without that the hook would look in the agent's own working directory, find no
 Makefile there in a monorepo, and skip: an unattended run with nothing checking
