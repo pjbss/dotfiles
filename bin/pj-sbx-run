@@ -11,7 +11,7 @@
 # cannot interfere with them.
 #
 # Everything after the task name is passed through to pj-run-issues, so see
-# `pj-run-issues --help` for --max-issues, --test-dir, --no-review and
+# `pj-run-issues --help` for --max-issues, --test-cmd, --no-review and
 # --dry-run. The one exception is --project-dir, which this consumes.
 #
 # Usage: pj-sbx-run <task-name> [--project-dir DIR] [pj-run-issues args...] [--help|-h]

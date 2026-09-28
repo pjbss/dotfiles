@@ -12,7 +12,7 @@
 #
 # Nothing is committed before it has been reviewed. The implementing agent is
 # told to leave its work in the working tree; this loop stages it, gates it on
-# `make test`, has it reviewed, and makes the commit itself. Reviewing after
+# the test command, has it reviewed, and makes the commit itself. Reviewing after
 # the commit instead -- which is what this used to do -- meant a review could
 # only ask for an amendment, so an issue that failed review twice went back
 # onto the queue while its commit stayed in the branch, and the next run built
@@ -30,12 +30,12 @@
 # only in a file nobody is watching is indistinguishable from one that never
 # ran.
 #
-# Usage: pj-run-issues [--max-issues N] [--test-dir DIR] [--no-review]
+# Usage: pj-run-issues [--max-issues N] [--test-cmd CMD] [--no-review]
 #                      [--dry-run] [--plain] [--force] [--help|-h]
 #
 #   --max-issues N  Stop after N issues (default: drain the queue).
-#   --test-dir DIR  Directory holding the Makefile whose `test` target gates
-#                   the run (default: discovered, see below).
+#   --test-cmd CMD  Command that gates the run, run with `sh -c` from the
+#                   project root (default: discovered, see below).
 #   --no-review     Skip the review pass. For a first smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
@@ -46,7 +46,7 @@
 #
 # Every line of output is labeled with the agent that produced it -- `tdd`
 # while pj-tdd implements, `rev` while the reviewer reads, `fix` during a
-# remediation pass, `gate` for `make test`, `git` while pj-commit writes the
+# remediation pass, `gate` for the test command, `git` while pj-commit writes the
 # commit, `loop` for the loop's own decisions -- and colored to match. Three agents and their subagents write to
 # one terminal over a run of hours; an unlabeled stream of that is not
 # something anyone can audit afterwards, which defeats the point of watching an
@@ -62,13 +62,16 @@
 # root is the wrong answer: it holds neither this project's issues nor its
 # tests. `issues/` has to be in that directory.
 #
-# The `make test` gate doesn't have to be in the same directory. Issues and the
-# PRD live at the project root because that's where the paths written inside
-# them resolve, while in a monorepo the Makefile belongs to one subproject
-# further down. Without --test-dir, the project root is used when it has a
-# `test` target, and otherwise the tree below it is searched -- finding several
-# is refused rather than guessed at, since picking the wrong suite would mean
-# an unattended run gated on tests that never touch the code it wrote.
+# The gate is a command, always run from the project root. Issues and the PRD
+# live at the project root because that's where the paths written inside them
+# resolve, while in a monorepo the Makefile belongs to one subproject further
+# down -- so the command can reach wherever the suite is, e.g.
+# `make -C backend test`, or several suites joined with `&&`. The loop never
+# needs to know what a package is. Without --test-cmd, the gate is `make test`
+# when the project root has a `test` target, and otherwise the tree below it is
+# searched for one, giving `make -C <dir> test` -- finding several is refused
+# rather than guessed at, since picking the wrong suite would mean an
+# unattended run gated on tests that never touch the code it wrote.
 #
 # Refuses to run outside a spawned sandbox unless --force. This is an
 # unattended agent with --dangerously-skip-permissions: the VM is what makes
@@ -82,9 +85,10 @@
 # injection sitting in the repo it was pointed at.
 #
 # Sets PJ_STOP_TESTS=1, which arms the Stop hook: a session cannot finish while
-# `make test` is red, and PJ_TEST_DIR so that hook gates on the same suite this
-# loop does -- the agent's own working directory is the project root, which in
-# a monorepo has no Makefile, and the hook skips silently when it finds none.
+# the gate is red, and PJ_TEST_CMD and PJ_PROJECT_ROOT so that hook runs the
+# same command from the same place this loop does -- the agent's own working
+# directory is the project root, which in a monorepo has no Makefile, and the
+# hook skips silently when it finds none.
 
 set -eu
 
@@ -208,7 +212,7 @@ say_verdict() {
 }
 
 max_issues=""
-test_dir=""
+test_cmd=""
 review=1
 dry_run=""
 plain=""
@@ -219,9 +223,9 @@ while [ $# -gt 0 ]; do
 		--max-issues)
 			[ $# -ge 2 ] || fail "--max-issues needs a number"
 			max_issues="$2"; shift 2 ;;
-		--test-dir)
-			[ $# -ge 2 ] || fail "--test-dir needs a directory"
-			test_dir="$2"; shift 2 ;;
+		--test-cmd)
+			[ $# -ge 2 ] && [ -n "$2" ] || fail "--test-cmd needs a command, e.g. --test-cmd 'make -C backend test'"
+			test_cmd="$2"; shift 2 ;;
 		--no-review) review=""; shift ;;
 		--dry-run) dry_run=1; shift ;;
 		--plain) plain=1; shift ;;
@@ -254,18 +258,28 @@ project_root="$PWD"
 [ -d issues ] || fail "no issues/ directory in $project_root -- this loop takes the directory you run it from as the project, not the repository root, so cd to wherever issues/ lives. If the work isn't planned yet, start with pj-write-prd and pj-plan-issues."
 command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
 
-# --- where the `make test` gate lives ---------------------------------------
+# --- the test gate ----------------------------------------------------------
+
+# shell_word STRING -- STRING as one word for `sh -c`: bare when it is only
+# characters no shell treats specially, so the common case reads naturally, and
+# single-quoted otherwise, with each embedded ' closed, escaped and reopened.
+shell_word() {
+	case "$1" in
+		*[!A-Za-z0-9._/+=:@%-]*|'')
+			printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+		*) printf '%s' "$1" ;;
+	esac
+}
 
 # True when DIR holds a Makefile declaring a `test` target.
 has_test_target() {
 	[ -f "$1/Makefile" ] && grep -q '^test:' "$1/Makefile"
 }
 
-if [ -n "$test_dir" ]; then
-	[ -d "$test_dir" ] || fail "--test-dir '$test_dir' is not a directory"
-	has_test_target "$test_dir" || fail "--test-dir '$test_dir' has no Makefile with a 'test' target -- that target is this loop's only check that the work actually works"
+if [ -n "$test_cmd" ]; then
+	: # named explicitly -- run as given, since only running it can check it
 elif has_test_target .; then
-	test_dir="."
+	test_cmd="make test"
 else
 	# Depth-limited, and pruning the directories that are full of vendored
 	# Makefiles nobody means, so that on a large monorepo this stays a
@@ -291,29 +305,29 @@ else
 	CANDIDATES
 
 	if [ "$found" -eq 0 ]; then
-		fail "no Makefile with a 'test' target under $project_root -- this loop uses 'make test' as its gate, so the project needs one. Pass --test-dir DIR if it lives somewhere this didn't look."
+		fail "no Makefile with a 'test' target under $project_root -- without --test-cmd, a 'make test' target is the only gate this loop can find for itself. Pass --test-cmd CMD to name the command that gates this run."
 	fi
 
 	if [ "$found" -gt 1 ]; then
-		fail "several 'make test' targets under $project_root -- pass --test-dir to say which one gates this run:
+		fail "several 'make test' targets under $project_root -- pass --test-cmd to say which one gates this run:
 $(printf '%s' "$discovered" | sed 's|^|  |')"
 	fi
 
-	test_dir="$(printf '%s' "$discovered" | head -1)"
+	# Quoted, because this string is run by `sh -c` -- here and in the Stop
+	# hook, via PJ_TEST_CMD -- and a directory called "my app" would otherwise
+	# split into `-C my` and a target named `app`.
+	test_cmd="make -C $(shell_word "$(printf '%s' "$discovered" | head -1)") test"
 fi
 
-test_dir_abs="$(cd "$test_dir" && pwd)"
-test_dir_rel="${test_dir#./}"
-
-# The implementing agent runs at the project root, so when the gate is
-# elsewhere it has to be told -- a plain `make test` there would fail, or worse,
+# The implementing agent runs at the project root, so when the gate is anything
+# but a plain `make test` it has to be told -- that would fail there, or worse,
 # run some other subproject's suite.
 test_hint=""
-if [ "$test_dir_abs" != "$project_root" ]; then
-	say "gating on the 'make test' target in $test_dir_rel"
+if [ "$test_cmd" != "make test" ]; then
+	say "gating on '$test_cmd'"
 	test_hint="
 
-The test suite for this work is in $test_dir_rel: run it with 'make -C $test_dir_rel test'. There is no test target at the project root."
+The test gate for this work is '$test_cmd', run from the project root. A plain 'make test' there is not the gate."
 fi
 
 export PJ_ISSUES_DIR="$project_root/issues"
@@ -344,7 +358,7 @@ log() {
 }
 
 say "run $run_id -- logging to $run_dir"
-log "started in $project_root, gating on $test_dir_abs"
+log "started in $project_root, gating on '$test_cmd'"
 
 # run_claude_sink RENDERER_ARGS... -- where a phase's output goes.
 #
@@ -417,7 +431,8 @@ run_claude() {
 		env -u GH_TOKEN -u GITHUB_TOKEN \
 			-u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
 			-u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
-			PJ_STOP_TESTS=1 PJ_TEST_DIR="$test_dir_abs" \
+			-u PJ_TEST_DIR \
+			PJ_STOP_TESTS=1 PJ_TEST_CMD="$test_cmd" PJ_PROJECT_ROOT="$project_root" \
 			claude -p "$prompt" \
 			--dangerously-skip-permissions \
 			$format_args \
@@ -449,9 +464,9 @@ make_test_gate() {
 
 	printf '%s %s%-4s%s %s %s' \
 		"$(date +%H:%M:%S)" "$(phase_color gate)" "gate" "$C_RESET" \
-		"$GLYPH_STEP" "make test in ${test_dir_rel:-.} ... "
+		"$GLYPH_STEP" "$test_cmd ... "
 
-	if make -C "$test_dir_abs" test > "$gate_output" 2>&1; then
+	if (cd "$project_root" && sh -c "$test_cmd") > "$gate_output" 2>&1; then
 		gate_status=0
 	else
 		gate_status=$?
@@ -538,8 +553,8 @@ passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd |
 	fi
 
 	if ! make_test_gate "$issue_log"; then
-		say_phase gate "make test is failing after $issue_name -- stopping"
-		log "stopped: make test failed after $issue_name"
+		say_phase gate "'$test_cmd' is failing after $issue_name -- stopping"
+		log "stopped: '$test_cmd' failed after $issue_name"
 		break
 	fi
 
@@ -627,8 +642,8 @@ Do not commit and do not push: this loop commits once the review passes.$test_hi
 				git add -A
 
 				if ! make_test_gate "$issue_log"; then
-					say_phase gate "make test is failing after remediation -- stopping"
-					log "stopped: make test failed after remediating $issue_name"
+					say_phase gate "'$test_cmd' is failing after remediation -- stopping"
+					log "stopped: '$test_cmd' failed after remediating $issue_name"
 					exit 1
 				fi
 

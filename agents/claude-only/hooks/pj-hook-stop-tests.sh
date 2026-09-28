@@ -21,10 +21,10 @@
 # e.g. `make -C backend test && make -C frontend test`. A PJ_PROJECT_ROOT that
 # doesn't exist skips the gate rather than running the command somewhere else.
 #
-# Without PJ_TEST_CMD, the older form still works: `make test` in PJ_TEST_DIR,
-# or in the session's working directory. A project with no `make test` target
-# is then silently skipped rather than treated as passing or failing, since
-# this hook is synced to every project.
+# Without PJ_TEST_CMD, the gate is `make test` in the session's working
+# directory. A project with no `make test` target is then silently skipped
+# rather than treated as passing or failing, since this hook is synced to every
+# project.
 
 set -eu
 
@@ -42,7 +42,7 @@ if [ -n "${PJ_TEST_CMD:-}" ]; then
 	gate_dir="${PJ_PROJECT_ROOT:-$cwd}"
 	gate_cmd="$PJ_TEST_CMD"
 else
-	gate_dir="${PJ_TEST_DIR:-$cwd}"
+	gate_dir="$cwd"
 	gate_cmd="make test"
 fi
 

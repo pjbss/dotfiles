@@ -76,6 +76,22 @@ say_stub() {
 issue_name="$(printf '%s' "$prompt" | grep -o '[0-9][0-9][0-9]-[A-Za-z0-9._-]*\.md' | head -1)"
 issue_file="issues/$issue_name"
 
+# One line per invocation, whatever it was asked to do, when a test wants to
+# check that every call path -- not just the implementing one -- got the same
+# environment. Kept outside the repo so it never becomes part of the work.
+if [ -n "${STUB_ENV_LOG:-}" ]; then
+	case "$prompt" in
+		*"pj-review skill"*) call=review ;;
+		*"pj-commit skill"*) call=commit ;;
+		*"requested changes to your"*) call=remediate ;;
+		*"pj-tdd skill"*) call=tdd ;;
+		*) call=other ;;
+	esac
+	printf '%s PJ_TEST_DIR=%s PJ_TEST_CMD=%s PJ_PROJECT_ROOT=%s\n' "$call" \
+		"${PJ_TEST_DIR:-unset}" "${PJ_TEST_CMD:-unset}" "${PJ_PROJECT_ROOT:-unset}" \
+		>> "$STUB_ENV_LOG"
+fi
+
 case "$prompt" in
 	*"pj-review skill"*)
 		mkdir -p issues/reviews
@@ -140,6 +156,8 @@ Issue: issues/$issue_name"
 		# the environment and prompt a real agent would have received.
 		{
 			echo "PJ_TEST_DIR=${PJ_TEST_DIR:-unset}"
+			echo "PJ_TEST_CMD=${PJ_TEST_CMD:-unset}"
+			echo "PJ_PROJECT_ROOT=${PJ_PROJECT_ROOT:-unset}"
 			echo "$prompt"
 		} > "stub-call-${issue_name%.md}.txt"
 
@@ -297,7 +315,7 @@ assert_contains "$out" "tdd" "the implementing phase labels its lines"
 assert_contains "$out" "rev" "the review phase is labeled separately from the implementation"
 assert_contains "$out" "gate" "the make test gate is labeled too"
 assert_contains "$out" "Bash" "the agent's tool calls are rendered, not just its final message"
-assert_contains "$out" "make test in" "the gate announces itself before running, so a slow suite doesn't look like a hang"
+assert_contains "$out" "make test ... " "the gate announces itself before running, so a slow suite doesn't look like a hang"
 assert_contains "$out" "pass" "a green gate says so on that same line"
 assert_contains "$out" "issues/prd.md" "a subagent's tool call is rendered too"
 assert_contains "$out" "STUB_SUITE_PASSED" \
@@ -431,20 +449,70 @@ assert_exit_code 1 "$rc" "the repo root of a nested project is not itself a proj
 assert_contains "$out" "not the repository root" \
 	"the refusal explains that the loop anchors on the directory it was run from"
 
-# === finding the `make test` gate ===========================================
+# === finding the gate =======================================================
 
 # The PRD and issues sit at the top, where the paths written in them resolve,
 # while the suite belongs to one subproject -- the shape that used to fail the
 # preflight outright.
+#
+# PJ_TEST_DIR is set on the way in to prove it is dropped rather than passed
+# through: the loop's own parent may well be another run that still sets it.
 project="$(make_repo autodiscover 1 "" backend)"
-run_loop "$project"
+PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
 assert_exit_code 0 "$rc" "a single nested 'make test' target is found without being named"
-assert_contains "$out" "gating on the 'make test' target in backend" \
-	"the run says which suite it settled on"
-assert_contains "$(cat "$project/stub-call-001-slice.txt")" "make -C backend test" \
-	"the agent is told where to run the suite, since there is none at its cwd"
-assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_DIR=$project/backend" \
-	"the Stop hook is pointed at the same suite, so the red-test gate isn't silently skipped"
+assert_contains "$out" "gating on 'make -C backend test'" \
+	"the run says which command it settled on"
+assert_contains "$out" "make -C backend test ... " \
+	"the gate's progress line names the command it is about to run"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "'make -C backend test'" \
+	"the agent is told the command, since there is no suite at its cwd"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=make -C backend test" \
+	"the Stop hook is handed the same command, so the red-test gate isn't silently skipped"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_PROJECT_ROOT=$project" \
+	"the Stop hook is told where to run it from"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_DIR=unset" \
+	"no invocation receives PJ_TEST_DIR, even when the loop itself was given one"
+
+# Every call path, not just the implementing one: review, remediation and
+# commit each get the same environment. A changes-requested verdict is what
+# drives the loop through all four.
+project="$(make_repo everycall 1 "" backend)"
+env_log="$fixture_root/everycall-env.log"
+STUB_ENV_LOG="$env_log" STUB_VERDICT=changes-requested PJ_TEST_DIR="$fixture_root/stale" \
+	run_loop "$project"
+for call in tdd review remediate; do
+	assert_contains "$(cat "$env_log")" "$call PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project" \
+		"the $call invocation gets PJ_TEST_CMD and PJ_PROJECT_ROOT, and no PJ_TEST_DIR"
+done
+project="$(make_repo everycommit 1 "" backend)"
+env_log="$fixture_root/everycommit-env.log"
+STUB_ENV_LOG="$env_log" PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
+assert_contains "$(cat "$env_log")" "commit PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project" \
+	"the commit invocation gets PJ_TEST_CMD and PJ_PROJECT_ROOT, and no PJ_TEST_DIR"
+assert_eq "0" "$(grep -vc "PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project\$" "$env_log" || true)" \
+	"no invocation of any kind gets a different environment"
+
+# The discovered directory goes into a string that `sh -c` runs, in the gate
+# and in the Stop hook alike, so a name the shell would split or expand has to
+# arrive as one word.
+project="$(make_repo spacedir 1 "" "bob's app")"
+run_loop "$project"
+assert_exit_code 0 "$rc" "a suite discovered under a directory with a space and a quote still gates the run"
+assert_contains "$out" "make -C 'bob'\\''s app' test ... " \
+	"the discovered directory is shell-quoted into the command"
+assert_ok "and the gate really ran that suite, rather than failing and stopping" \
+	test -f "$project/issues/done/001-slice.md"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=make -C 'bob'\\''s app' test" \
+	"the Stop hook is handed the same quoted command"
+assert_ok "and that command works when run the way the hook runs it" \
+	sh -c "cd '$project' && make -C 'bob'\\''s app' test"
+
+project="$(make_repo rootgate 1)"
+run_loop "$project"
+assert_exit_code 0 "$rc" "a root 'make test' target is found without being named"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=make test" \
+	"a root target resolves to plain 'make test'"
+assert_contains "$out" "make test ... " "the root gate's progress line names 'make test'"
 
 project="$(make_repo ambiguous 1 "" backend)"
 mkdir -p "$project/frontend"
@@ -453,28 +521,48 @@ git -C "$project" add -A
 git -C "$project" commit -q -m "add a second suite"
 run_loop "$project"
 assert_exit_code 1 "$rc" "two candidate suites are refused rather than guessed between"
-assert_contains "$out" "--test-dir" "the ambiguity refusal names the flag that resolves it"
+assert_contains "$out" "--test-cmd" "the ambiguity refusal names the flag that resolves it"
 assert_contains "$out" "backend" "the ambiguity refusal lists the candidates it found"
 assert_contains "$out" "frontend" "the ambiguity refusal lists all of them"
 
+run_loop "$project" --test-cmd 'make -C backend test'
+assert_exit_code 0 "$rc" "--test-cmd resolves the ambiguity"
+assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=make -C backend test" \
+	"--test-cmd gates on exactly that command"
+assert_contains "$out" "make -C backend test ... " "the gate runs the command it was given"
+
+# Where the gate ran, reported by the gate itself. `pwd -P` on both sides,
+# because macOS's TMPDIR is a symlink.
+project="$(make_repo cmdroot 1 "" backend)"
+run_loop "$project" --test-cmd 'pwd -P > gate-cwd.txt'
+assert_exit_code 0 "$rc" "a --test-cmd that isn't make at all is run as given"
+assert_eq "$(cd "$project" && pwd -P)" "$(cat "$project/gate-cwd.txt" 2>/dev/null)" \
+	"the gate command runs with the project root as its working directory"
+
+project="$(make_repo redcmd 2 "" backend)"
+run_loop "$project" --test-cmd 'echo CMD_TAIL_LINE; exit 3'
+assert_contains "$out" "'echo CMD_TAIL_LINE; exit 3' is failing" "a red --test-cmd stops the run"
+assert_contains "$out" "CMD_TAIL_LINE" "the red command's output tail is printed"
+assert_not_ok "the review never runs over a red gate" test -f "$project/issues/reviews/001-slice.md"
+assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"
+
+project="$(make_repo badtestcmd 1)"
+run_loop "$project" --test-cmd
+assert_exit_code 1 "$rc" "--test-cmd with no value is refused instead of crashing the shell"
+assert_contains "$out" "needs a command" "the refusal says what --test-cmd wants"
+
+run_loop "$project" --test-cmd ''
+assert_exit_code 1 "$rc" "--test-cmd with an empty value is refused too"
+assert_contains "$out" "needs a command" "the empty-value refusal says what --test-cmd wants"
+
 run_loop "$project" --test-dir backend
-assert_exit_code 0 "$rc" "--test-dir resolves the ambiguity"
-assert_contains "$out" "gating on the 'make test' target in backend" "--test-dir picks that suite"
+assert_exit_code 1 "$rc" "--test-dir is no longer accepted"
+assert_contains "$out" "unknown argument '--test-dir'" "--test-dir gets the unknown-argument refusal"
 
-project="$(make_repo badtestdir 1)"
-run_loop "$project" --test-dir nowhere
-assert_exit_code 1 "$rc" "--test-dir pointing at nothing is refused"
-assert_contains "$out" "not a directory" "the refusal says the directory doesn't exist"
-
-mkdir -p "$project/empty"
-run_loop "$project" --test-dir empty
-assert_exit_code 1 "$rc" "--test-dir pointing at a directory with no test target is refused"
-assert_contains "$out" "no Makefile with a 'test' target" \
-	"the refusal says what was missing, rather than falling back to the root Makefile"
-
-run_loop "$project" --test-dir
-assert_exit_code 1 "$rc" "--test-dir with no value is refused instead of crashing the shell"
-assert_contains "$out" "needs a directory" "the refusal says what --test-dir wants"
+out="$("$RUN_ISSUES" --help 2>&1)"
+assert_contains "$out" "--test-cmd" "--help describes --test-cmd"
+assert_not_contains "$out" "--test-dir" "--help no longer mentions --test-dir"
+assert_not_ok "the script's own header no longer mentions --test-dir" grep -q -- '--test-dir' "$RUN_ISSUES"
 
 # === a red suite in the subdirectory stops the run ==========================
 
@@ -485,7 +573,7 @@ printf 'test:\n\t@echo GATE_DETAIL_LINE; exit 1\n' > "$project/backend/Makefile"
 git -C "$project" add -A
 git -C "$project" commit -q -m "make the suite red"
 run_loop "$project"
-assert_contains "$out" "make test is failing" "a red suite in the gate directory stops the run"
+assert_contains "$out" "'make -C backend test' is failing" "a red suite in the gate directory stops the run"
 assert_contains "$out" "GATE_DETAIL_LINE" \
 	"a red gate prints the output on the spot -- the reason the run stopped shouldn't need a log dive"
 assert_not_ok "the next issue is never started" test -f "$project/stub-work-002-slice.txt"

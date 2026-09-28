@@ -29,7 +29,7 @@ STOP_TESTS="$HOOKS_DIR/pj-hook-stop-tests.sh"
 
 # The stop-gate cases below each set exactly the PJ_* variables they mean to
 # test. Anything inherited would leak into the ones that don't -- and under
-# pj-run-issues PJ_TEST_DIR is this very repo, so the hook would run this suite
+# pj-run-issues PJ_TEST_CMD is this very repo's suite, so the hook would run it
 # from inside itself, recursing without end.
 unset PJ_STOP_TESTS PJ_TEST_DIR PJ_TEST_CMD PJ_PROJECT_ROOT
 
@@ -222,22 +222,13 @@ print(json.dumps({"cwd": sys.argv[1]}))' "$no_make_project")"
 if out="$(printf '%s' "$nomake_payload" | PJ_STOP_TESTS=1 TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "a project with no make test target is skipped, not treated as failing"
 
-# PJ_TEST_DIR is how pj-run-issues keeps the gate armed in a monorepo: the
-# session's cwd is the project root, which has no Makefile, so without it the
-# check above would skip and the unattended run would have no gate at all.
+# PJ_TEST_DIR used to be a second way to say where the gate lives; nothing
+# sets it any more, and two ways is how they drift apart. It is ignored, so a
+# stale one can't point the gate at some other project's suite.
 if out="$(printf '%s' "$nomake_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$failing_project" \
 	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
-assert_exit_code 2 "$rc" "PJ_TEST_DIR gates on that suite even when the session's cwd has no Makefile"
-assert_contains "$out" "boom: one test failed" "the failure from the PJ_TEST_DIR suite is what comes back"
-
-if out="$(printf '%s' "$stop_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$passing_project" \
-	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
-assert_exit_code 0 "$rc" "PJ_TEST_DIR wins over the session's cwd rather than being a fallback"
-
-if out="$(printf '%s' "$pass_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$fixture_root/absent" \
-	TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
-assert_exit_code 0 "$rc" "an unreachable PJ_TEST_DIR skips rather than running some other project's suite"
-assert_eq "" "$out" "the skip is silent"
+assert_exit_code 0 "$rc" "PJ_TEST_DIR is ignored -- the session's cwd, with no Makefile, is still skipped"
+assert_eq "" "$out" "the PJ_TEST_DIR suite is never run"
 
 # PJ_TEST_CMD is the primary gate: a command rather than a directory, so the
 # loop can hand the hook one that spans several packages. Only stderr is
@@ -287,11 +278,6 @@ assert_exit_code 0 "$rc" "an unreachable PJ_PROJECT_ROOT skips rather than runni
 assert_eq "" "$out" "the PJ_PROJECT_ROOT skip is silent"
 if [ -e "$ran_marker" ]; then ran=yes; else ran=no; fi
 assert_eq "no" "$ran" "the command never ran at all when PJ_PROJECT_ROOT is unreachable"
-
-if out="$(printf '%s' "$pass_payload" | PJ_STOP_TESTS=1 PJ_TEST_DIR="$failing_project" \
-	PJ_TEST_CMD='true' TMPDIR="$fixture_root" "$STOP_TESTS" 2>&1)"; then rc=0; else rc=$?; fi
-assert_exit_code 0 "$rc" "PJ_TEST_CMD takes precedence over PJ_TEST_DIR when both are set"
-assert_eq "" "$out" "the PJ_TEST_DIR suite is never run when PJ_TEST_CMD is set"
 
 multi_project="$fixture_root/multi"
 mkdir -p "$multi_project/backend"

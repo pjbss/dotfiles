@@ -230,14 +230,14 @@ own decisions:
     17:02:52 tdd  ▸ Agent  pj-test-auditor
     17:02:58 tdd    ↳ Read   test/csv_export_test.sh
     17:03:10 tdd  ✓ finished  4m12s  $0.41
-    17:03:10 gate ▸ make test in . ... pass
+    17:03:10 gate ▸ make test ... pass
     17:03:12 rev  ▸ reviewing 003-csv-export.md (attempt 1)
     17:03:39 rev  ✗ changes requested
     17:03:39 rev    ↳ 1. **Unsupported claim** -- `src/export.sh:41`
     17:03:39 rev    ↳    Criterion 2 is checked, but no test covers empty input.
     17:03:39 rev  ▸ one remediation pass
     17:04:30 fix  ▸ Edit   test/csv_export_test.sh
-    17:04:51 gate ▸ make test in . ... pass
+    17:04:51 gate ▸ make test ... pass
     17:04:52 rev  ▸ reviewing 003-csv-export.md (attempt 2)
     17:05:20 rev  ✓ approved
     17:05:20 rev    ↳ `issues/003-csv-export.md`, `make test`: passed
@@ -259,19 +259,20 @@ needed. `--plain` gives the stream up and goes back to printing only each
 agent's final message -- the escape hatch for a `claude` release whose event
 schema this doesn't understand yet.
 
-The project needs a `make test` target: that's the loop's only real check that
-the work works, and the `Stop` hook uses it to refuse to let a session finish
-while it's red.
+The project needs a test command -- by default, a `make test` target: that's
+the loop's only real check that the work works, and the `Stop` hook uses it to
+refuse to let a session finish while it's red.
 
 The project is wherever you run the loop from, not the git root -- in a
 monorepo those aren't the same thing, and the repo root has neither this
-project's issues nor its tests. The `make test` gate doesn't have to be in that
-same directory: issues and the PRD sit at the project root because that's where
-the paths written in them resolve, while the Makefile may belong to one
-subproject further down. It's found automatically when there's exactly one
-candidate, and otherwise you name it:
+project's issues nor its tests. The gate is a command, always run from that
+directory: issues and the PRD sit at the project root because that's where the
+paths written in them resolve, while the Makefile may belong to one subproject
+further down, and a command can reach it there. With no flag it's `make test`
+when the project root has that target, or `make -C <dir> test` when there's
+exactly one below it; otherwise you name it:
 
-    $ pj-run-issues --test-dir sparkwatch/backend
+    $ pj-run-issues --test-cmd 'make -C sparkwatch/backend test'
 
 Refusing to guess between several is deliberate -- gating an unattended run on
 a suite that never sees the code it wrote is the same as not gating it at all.
@@ -460,11 +461,13 @@ environment it hands its children, even in a VM that was spawned with
 credentials. It refuses to run outside a sandbox at all without `--force`.
 
 The gate has to actually be pointed at something for any of that to hold. The
-loop resolves the suite once -- the project root's own `make test` target, a
-single one found below it, or the one `--test-dir` names -- and passes it to
-its children as `PJ_TEST_DIR`, which is what the `Stop` hook gates on. Without
-that the hook would look in the agent's own working directory, find no Makefile
-there in a monorepo, and skip: an unattended run with nothing checking it.
+loop resolves the command once -- `make test` for the project root's own
+target, `make -C <dir> test` for a single one found below it, or whatever
+`--test-cmd` says -- and passes it to its children as `PJ_TEST_CMD`, with the
+project root as `PJ_PROJECT_ROOT`, which is what the `Stop` hook gates on.
+Without that the hook would look in the agent's own working directory, find no
+Makefile there in a monorepo, and skip: an unattended run with nothing checking
+it.
 
 `issues/` is gitignored working state, so it doesn't travel with
 `git worktree add`. Planning inside the VM sidesteps that; if you planned on
