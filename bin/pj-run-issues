@@ -108,7 +108,8 @@
 # the gate is red, and PJ_TEST_CMD and PJ_PROJECT_ROOT so that hook runs the
 # same command from the same place this loop does -- the agent's own working
 # directory is the project root, which in a monorepo has no Makefile, and the
-# hook skips silently when it finds none.
+# hook skips silently when it finds none. The session-start hook reads the same
+# PJ_TEST_CMD to tell the agent what its gate is.
 
 set -eu
 
@@ -344,15 +345,11 @@ $(printf '%s' "$discovered" | sed 's|^|  |')"
 	test_cmd="make -C $(shell_word "$(printf '%s' "$discovered" | head -1)") test"
 fi
 
-# The implementing agent runs at the project root, so when the gate is anything
-# but a plain `make test` it has to be told -- that would fail there, or worse,
-# run some other subproject's suite.
-test_hint=""
+# The agents are not told the gate here: each session inherits PJ_TEST_CMD,
+# and the session-start hook announces it -- the one mechanism an interactive
+# session uses too, so the two cannot drift apart.
 if [ "$test_cmd" != "make test" ]; then
 	say "gating on '$test_cmd'"
-	test_hint="
-
-The test gate for this work is '$test_cmd', run from the project root. A plain 'make test' there is not the gate."
 fi
 
 export PJ_ISSUES_DIR="$project_root/issues"
@@ -560,7 +557,7 @@ and its rules about stopping rather than expanding scope.
 
 Do not commit. Leave your work uncommitted in the working tree: it is reviewed
 before it is committed, and this loop makes the commit itself once the review
-passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
+passes. Do not start any other issue. Do not push." "$issue_log" tdd || {
 		say_phase tdd "claude exited non-zero while implementing $issue_name -- stopping"
 		log "stopped: claude failed on $issue_name"
 		stopped_early=1
@@ -627,7 +624,7 @@ issues/done/$issue_name. It is not committed: the work under review is the
 staged change, which 'git diff --cached' shows in full, including new files.
 
 Write your verdict to $verdict_file. Review only; do not change any code, and
-do not commit -- this loop commits once you approve.$test_hint" \
+do not commit -- this loop commits once you approve." \
 			"$run_dir/$issue_slug.review.log" rev || {
 			say_phase rev "claude exited non-zero while reviewing $issue_name -- stopping"
 			log "stopped: claude failed reviewing $issue_name"
@@ -674,7 +671,7 @@ do not commit -- this loop commits once you approve.$test_hint" \
 implementation of issues/done/$issue_name, which is staged but not committed.
 Read the review, address every finding, and keep the test suite green.
 
-Do not commit and do not push: this loop commits once the review passes.$test_hint" \
+Do not commit and do not push: this loop commits once the review passes." \
 					"$run_dir/$issue_slug.remediate.log" fix || {
 					say_phase fix "claude exited non-zero while remediating $issue_name -- stopping"
 					log "stopped: claude failed remediating $issue_name"

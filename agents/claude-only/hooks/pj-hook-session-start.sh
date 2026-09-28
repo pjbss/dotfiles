@@ -34,8 +34,23 @@ if [ -f "${PJ_SANDBOX_MARKER:-/etc/pj-sandbox}" ]; then
 	echo "Write only under /workspace."
 fi
 
-if [ -f Makefile ] && grep -q '^test:' Makefile 2>/dev/null; then
-	echo "Tests: run 'make test'. It is the contract -- hooks and the autonomous issue loop both call it."
+# Resolved in the order pj-run-issues resolves its gate, so the agent is told
+# the same command in the loop and at an interactive prompt alike. The loop's
+# PJ_TEST_CMD is authoritative when set.
+test_cmd=""
+if [ -n "${PJ_TEST_CMD:-}" ]; then
+	test_cmd="$PJ_TEST_CMD"
+elif [ -x .pj/test ]; then
+	test_cmd="./.pj/test"
+elif [ -f Makefile ] && grep -q '^test:' Makefile 2>/dev/null; then
+	test_cmd="make test"
+fi
+
+if [ -n "$test_cmd" ]; then
+	# One line whatever PJ_TEST_CMD holds: `sh -c` runs a newline-separated
+	# command the same as a `; `-separated one.
+	test_cmd="$(printf '%s\n' "$test_cmd" | awk 'NR > 1 { printf "; " } { printf "%s", $0 }')"
+	echo "Tests: run '$test_cmd'. It is the contract -- hooks and the autonomous issue loop both call it."
 fi
 
 if [ -d issues ] && command -v pj-issues >/dev/null 2>&1; then

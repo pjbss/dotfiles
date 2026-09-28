@@ -155,6 +155,59 @@ assert_contains "$out" "make test" "the session-start hook tells a fresh session
 if out="$(printf '%s' '{"hook_event_name":"SessionStart","cwd":"/nonexistent"}' | "$SESSION_START" 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "the session-start hook still exits 0 for a directory it can't read"
 
+# The announced gate resolves in the loop's own order: PJ_TEST_CMD, then
+# ./.pj/test, then a root `make test` target, else nothing. Each fixture has no
+# issues/ directory, so the test line is the only thing the hook can print.
+session_start_in() {
+	python3 -c '
+import json, sys
+print(json.dumps({"hook_event_name": "SessionStart", "cwd": sys.argv[1],
+                  "session_start_reason": "startup"}))' "$1" | "$SESSION_START" 2>&1
+}
+
+gated="$fixture_root/gated"
+mkdir -p "$gated/.pj"
+printf 'test:\n\t@true\n' > "$gated/Makefile"
+printf '#!/bin/sh\nexit 0\n' > "$gated/.pj/test"
+chmod +x "$gated/.pj/test"
+
+if out="$(PJ_TEST_CMD="make -C backend test" session_start_in "$gated")"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "the session-start hook exits 0 with PJ_TEST_CMD set"
+assert_contains "$out" "Tests: run 'make -C backend test'" \
+	"with PJ_TEST_CMD set, the hook announces that command"
+assert_not_contains "$out" ".pj/test" "PJ_TEST_CMD wins over a .pj/test"
+assert_not_contains "$out" "'make test'" "PJ_TEST_CMD wins over a root 'make test' target"
+
+out="$(session_start_in "$gated")"
+assert_contains "$out" "Tests: run './.pj/test'" \
+	"without PJ_TEST_CMD, an executable .pj/test is announced as the test command"
+assert_not_contains "$out" "'make test'" ".pj/test wins over a root 'make test' target"
+
+make_only="$fixture_root/make-only"
+mkdir -p "$make_only"
+printf 'test:\n\t@true\n' > "$make_only/Makefile"
+out="$(session_start_in "$make_only")"
+assert_eq "Tests: run 'make test'. It is the contract -- hooks and the autonomous issue loop both call it." "$out" \
+	"with neither PJ_TEST_CMD nor .pj/test, a root 'make test' target gets today's line"
+
+ungated="$fixture_root/ungated"
+mkdir -p "$ungated"
+if out="$(session_start_in "$ungated")"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "the session-start hook exits 0 when it finds no test command"
+assert_eq "" "$out" "a project with none of the three gets no test line at all"
+
+# Invoked from inside a gated project, but the payload says the session is in
+# the ungated one: the payload wins.
+if out="$(cd "$gated" && session_start_in "$ungated")"; then rc=0; else rc=$?; fi
+assert_exit_code 0 "$rc" "the session-start hook exits 0 when invoked from elsewhere"
+assert_eq "" "$out" "the hook resolves against the payload's cwd, not the directory it was invoked from"
+
+# A command sh -c runs may span lines; the announcement still may not.
+out="$(PJ_TEST_CMD="make lint
+make test" session_start_in "$ungated")"
+assert_eq "1" "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "the announcement is a single line, even for a multi-line PJ_TEST_CMD"
+assert_contains "$out" "make lint; make test" "and a multi-line command is joined with '; ', which sh runs the same way"
+
 # === post-edit syntax check =================================================
 
 # Genuinely ungrammatical, not merely wrong: `if ...; then` with no `fi` is

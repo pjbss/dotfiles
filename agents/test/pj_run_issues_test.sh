@@ -92,6 +92,11 @@ if [ -n "${STUB_ENV_LOG:-}" ]; then
 		>> "$STUB_ENV_LOG"
 fi
 
+# Every prompt, in full, for a test that wants to check what none of them say.
+if [ -n "${STUB_PROMPT_LOG:-}" ]; then
+	printf '%s\n' "$prompt" >> "$STUB_PROMPT_LOG"
+fi
+
 case "$prompt" in
 	*"pj-review skill"*)
 		mkdir -p issues/reviews
@@ -467,8 +472,6 @@ assert_contains "$out" "gating on 'make -C backend test'" \
 	"the run says which command it settled on"
 assert_contains "$out" "make -C backend test ... " \
 	"the gate's progress line names the command it is about to run"
-assert_contains "$(cat "$project/stub-call-001-slice.txt")" "'make -C backend test'" \
-	"the agent is told the command, since there is no suite at its cwd"
 assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_CMD=make -C backend test" \
 	"the Stop hook is handed the same command, so the red-test gate isn't silently skipped"
 assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_PROJECT_ROOT=$project" \
@@ -481,12 +484,21 @@ assert_contains "$(cat "$project/stub-call-001-slice.txt")" "PJ_TEST_DIR=unset" 
 # drives the loop through all four.
 project="$(make_repo everycall 1 "" backend)"
 env_log="$fixture_root/everycall-env.log"
-STUB_ENV_LOG="$env_log" STUB_VERDICT=changes-requested PJ_TEST_DIR="$fixture_root/stale" \
-	run_loop "$project"
+prompt_log="$fixture_root/everycall-prompts.log"
+STUB_ENV_LOG="$env_log" STUB_PROMPT_LOG="$prompt_log" STUB_VERDICT=changes-requested \
+	PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
 for call in tdd review remediate; do
 	assert_contains "$(cat "$env_log")" "$call PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project" \
 		"the $call invocation gets PJ_TEST_CMD and PJ_PROJECT_ROOT, and no PJ_TEST_DIR"
 done
+# The session-start hook announces the gate from PJ_TEST_CMD, so the prompts
+# carry no second copy of it that could drift from the first.
+assert_contains "$(cat "$prompt_log")" "requested changes to your" \
+	"the prompt log really holds the remediate prompt, so the checks below cover it"
+assert_not_contains "$(cat "$prompt_log")" "make -C backend test" \
+	"no tdd, review or remediate prompt names the test command"
+assert_not_contains "$(cat "$prompt_log")" "test gate" \
+	"no tdd, review or remediate prompt says where to run tests"
 project="$(make_repo everycommit 1 "" backend)"
 env_log="$fixture_root/everycommit-env.log"
 STUB_ENV_LOG="$env_log" PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
