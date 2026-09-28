@@ -81,6 +81,18 @@
 # several candidates for arm 4 -- falling through or guessing would mean an
 # unattended run gated on tests that never touch the code it wrote.
 #
+# A run that would end clean first runs the gate once more, from the same root,
+# with PJ_TEST_SCOPE=all in its environment: the full sweep. A gate that
+# selects suites by what changed can't see one package's change breaking
+# another's suite, and the sweep is what keeps "the run ended clean" meaning
+# the whole tree is green. It is an environment variable rather than an
+# argument so a gate that ignores it -- a plain `make test`, a hand-written
+# .pj/test -- just runs what it always runs. A red sweep exits non-zero and
+# leaves the run's commits in place: each was reviewed and green on its own,
+# and rewinding them would destroy the one-issue-per-commit history. There is
+# no sweep when nothing was completed, or when the run stopped early on an
+# issue.
+#
 # Refuses to run outside a spawned sandbox unless --force. This is an
 # unattended agent with --dangerously-skip-permissions: the VM is what makes
 # that a reasonable thing to do rather than a reckless one.
@@ -463,7 +475,7 @@ run_claude() {
 	return "$claude_status"
 }
 
-# make_test_gate LOGFILE -> 0 pass, 1 fail
+# make_test_gate LOGFILE [SCOPE] -> 0 pass, 1 fail
 #
 # The gate suite, as one line. Until now it printed nothing at all: the run's
 # only real check that the work works was the one part of the run you couldn't
@@ -472,14 +484,30 @@ run_claude() {
 # should have to go find a log for it. The full output goes to LOGFILE either
 # way, and only the tail is printed -- a suite with a thousand lines of chatter
 # would otherwise bury the failure it just reported as thoroughly as silence.
+#
+# SCOPE is exported as PJ_TEST_SCOPE when given, and removed otherwise -- a
+# PJ_TEST_SCOPE=all inherited from whatever launched the loop would otherwise
+# turn every per-issue gate into the end-of-run sweep. A scoped gate says so on
+# its line, so the sweep can't be mistaken for one more issue's gate.
 make_test_gate() {
 	gate_output="$(mktemp)"
+	gate_scope="${2:-}"
+	gate_what="$test_cmd"
+	[ -z "$gate_scope" ] || gate_what="full sweep (PJ_TEST_SCOPE=$gate_scope): $test_cmd"
 
 	printf '%s %s%-4s%s %s %s' \
 		"$(date +%H:%M:%S)" "$(phase_color gate)" "gate" "$C_RESET" \
-		"$GLYPH_STEP" "$test_cmd ... "
+		"$GLYPH_STEP" "$gate_what ... "
 
-	if (cd "$project_root" && sh -c "$test_cmd") > "$gate_output" 2>&1; then
+	if (
+		cd "$project_root"
+		if [ -n "$gate_scope" ]; then
+			export PJ_TEST_SCOPE="$gate_scope"
+		else
+			unset PJ_TEST_SCOPE
+		fi
+		sh -c "$test_cmd"
+	) > "$gate_output" 2>&1; then
 		gate_status=0
 	else
 		gate_status=$?
@@ -499,6 +527,9 @@ make_test_gate() {
 }
 
 completed=0
+# Set by every break that ends the run on a problem rather than on a drained
+# queue or --max-issues, so the sweep below can tell the two apart.
+stopped_early=""
 
 while :; do
 	if [ -n "$max_issues" ] && [ "$completed" -ge "$max_issues" ]; then
@@ -532,6 +563,7 @@ before it is committed, and this loop makes the commit itself once the review
 passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd || {
 		say_phase tdd "claude exited non-zero while implementing $issue_name -- stopping"
 		log "stopped: claude failed on $issue_name"
+		stopped_early=1
 		break
 	}
 
@@ -541,6 +573,7 @@ passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd |
 	if [ -f "$issue_path" ]; then
 		say_phase tdd "$issue_name is still in issues/ -- pj-tdd left it for a human (see its Notes section)"
 		log "stopped: $issue_name not completed, left in issues/"
+		stopped_early=1
 		break
 	fi
 
@@ -562,12 +595,14 @@ passes. Do not start any other issue. Do not push.$test_hint" "$issue_log" tdd |
 	if git diff --cached --quiet; then
 		say_phase tdd "$issue_name produced no changes -- stopping rather than reviewing and committing nothing"
 		log "stopped: no changes produced for $issue_name"
+		stopped_early=1
 		break
 	fi
 
 	if ! make_test_gate "$issue_log"; then
 		say_phase gate "'$test_cmd' is failing after $issue_name -- stopping"
 		log "stopped: '$test_cmd' failed after $issue_name"
+		stopped_early=1
 		break
 	fi
 
@@ -715,6 +750,19 @@ Do not change any code. Do not push." \
 	say_ok loop "committed $issue_name as $(git rev-parse --short HEAD)"
 	log "committed $issue_name as $(git rev-parse HEAD)"
 done
+
+# --- the full sweep, once every issue is in --------------------------------
+#
+# The one check covering work several commits contributed to, which is why a
+# red one names itself rather than the last issue: that issue passed its own
+# gate, and is no more to blame than any other.
+if [ "$completed" -gt 0 ] && [ -z "$stopped_early" ]; then
+	if ! make_test_gate "$run_log" all; then
+		say_phase gate "the full sweep is failing across the whole tree, though every issue passed its own gate -- stopping. The $completed commit(s) this run made are left in place; each was reviewed and green on its own"
+		log "stopped: the full sweep failed after $completed issue(s)"
+		exit 1
+	fi
+fi
 
 say_ok loop "done -- $completed issue(s) completed this run"
 log "finished: $completed issue(s)"

@@ -685,6 +685,74 @@ if out="$(cd "$repo" && PATH="$stub_bin:$PATH" PJ_SANDBOX_MARKER="$marker" \
 	PJ_CLAUDE_ARGS="--output-format json" NO_COLOR=1 "$RUN_ISSUES" --plain 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "--plain makes that override allowed again, since nothing is rendering"
 
+# === the end-of-run full sweep ==============================================
+
+# Per-issue gating on an affected subset can't see a change in one package
+# breaking another's suite, so a run that would end clean re-runs its gate once
+# with PJ_TEST_SCOPE=all. Each gate invocation records its scope and cwd outside
+# the repo, so the record never becomes part of the work.
+sweep_cmd() {
+	printf 'echo "scope=${PJ_TEST_SCOPE:-unset} cwd=$(pwd -P)" >> %s' "$1"
+}
+
+project="$(make_repo sweepclean 2 "" backend)"
+gate_log="$fixture_root/sweepclean-gate.log"
+run_loop "$project" --test-cmd "$(sweep_cmd "$gate_log")"
+assert_exit_code 0 "$rc" "a clean run with a green sweep exits 0"
+assert_eq "3" "$(wc -l < "$gate_log" | tr -d ' ')" \
+	"a clean run invokes the gate once per issue and once more for the sweep"
+assert_eq "scope=all" "$(tail -1 "$gate_log" | cut -d' ' -f1)" \
+	"the sweep runs with PJ_TEST_SCOPE=all in its environment"
+assert_eq "0" "$(head -2 "$gate_log" | grep -vc '^scope=unset ' || true)" \
+	"the per-issue gates run without PJ_TEST_SCOPE"
+assert_eq "0" "$(grep -vc " cwd=$(cd "$project" && pwd -P)\$" "$gate_log" || true)" \
+	"the sweep runs from the project root, like every other gate invocation"
+assert_eq "1" "$(printf '%s\n' "$out" | grep -c 'gate ▸ full sweep (PJ_TEST_SCOPE=all): .* \.\.\. pass$' || true)" \
+	"the sweep's line is labeled distinctly from a per-issue gate line"
+assert_eq "2" "$(printf '%s\n' "$out" | grep -c 'gate ▸ echo .* \.\.\. pass$' || true)" \
+	"while each per-issue gate line keeps its plain shape"
+assert_contains "$out" "done -- 2 issue(s) completed this run" \
+	"a green sweep leaves the usual closing summary"
+
+# Inherited from whatever launched the loop, it must still not leak into the
+# per-issue gates, or every issue would pay for the full sweep.
+project="$(make_repo sweepinherit 1 "" backend)"
+gate_log="$fixture_root/sweepinherit-gate.log"
+PJ_TEST_SCOPE=all run_loop "$project" --test-cmd "$(sweep_cmd "$gate_log")"
+assert_eq "scope=unset" "$(head -1 "$gate_log" | cut -d' ' -f1)" \
+	"a PJ_TEST_SCOPE the loop inherited is dropped from the per-issue gate"
+
+# Green on every issue, red only across the whole tree: the cross-package
+# breakage the sweep exists to catch.
+project="$(make_repo sweepred 2 "" backend)"
+run_loop "$project" --test-cmd '[ "${PJ_TEST_SCOPE:-}" != all ] || { echo SWEEP_TAIL_LINE; exit 5; }'
+assert_exit_code 1 "$rc" "a red sweep makes the run exit non-zero"
+assert_eq "3" "$(git -C "$project" log --oneline | wc -l | tr -d ' ')" \
+	"a red sweep leaves every commit the run made in place"
+assert_contains "$out" "full sweep is failing" "the red-sweep message names the sweep as what failed"
+assert_not_contains "$out" "failing after 002-slice.md" "and doesn't blame the last issue"
+assert_contains "$out" "SWEEP_TAIL_LINE" "the red sweep's output tail is printed"
+
+project="$(make_repo sweepempty 0 "" backend)"
+gate_log="$fixture_root/sweepempty-gate.log"
+run_loop "$project" --test-cmd "$(sweep_cmd "$gate_log")"
+assert_exit_code 0 "$rc" "a run over an empty queue exits 0"
+assert_not_ok "a run that completes zero issues runs no sweep" test -f "$gate_log"
+
+# One issue committed, then the second goes red at its own gate: the run has
+# already stopped for its own reason, and a sweep would only bury it.
+project="$(make_repo sweepstopped 2 "" backend)"
+gate_log="$fixture_root/sweepstopped-gate.log"
+run_loop "$project" --test-cmd "$(sweep_cmd "$gate_log"); [ ! -f stub-work-002-slice.txt ]"
+assert_contains "$out" "is failing after 002-slice.md" "the second issue's gate stops the run"
+assert_eq "2" "$(wc -l < "$gate_log" | tr -d ' ')" \
+	"a run that stops early on a failing issue runs no sweep"
+assert_not_contains "$out" "full sweep" "and says nothing about one"
+
+assert_ok "the script's header describes the sweep" \
+	sh -c 'sed -n "/^set -eu/q;p" "$1" | grep -q "PJ_TEST_SCOPE=all"' _ "$RUN_ISSUES"
+assert_ok "the README describes the sweep" grep -q "PJ_TEST_SCOPE=all" "$DOTFILES_HOME/README"
+
 # === the manual test plan pointer ===========================================
 
 # A clean run reads as a verified branch, and it isn't one when planning set

@@ -291,6 +291,16 @@ finding several `make test` targets -- falling through or guessing would gate
 an unattended run on a suite that never sees the code it wrote, which is the
 same as not gating it at all.
 
+Before a clean run ends, the loop runs the gate once more with
+`PJ_TEST_SCOPE=all` in its environment -- the full sweep, labeled as such on
+its `gate` line. Gating each issue on only the suites it touched can't see a
+change in one package breaking another's, and the sweep is what makes "the run
+ended clean" mean the whole tree is green. A gate that ignores the variable
+just runs what it always runs. A red sweep exits non-zero and says the sweep
+failed, leaving the run's commits in place, since each was reviewed and green
+on its own. A run that completed nothing, or stopped early on an issue, has
+no sweep.
+
 A full queue takes a while, so start it under `tmux` if you don't want to hold
 the ssh session open for it.
 
