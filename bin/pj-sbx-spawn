@@ -92,15 +92,16 @@
 #
 # --post-create <path-or-command> is optional (see
 # issues/prd-post-create.md): if the value resolves to an existing file on
-# the host, relative to the repo root (sandbox_post_create_resolve,
-# sandbox/lib/post_create.sh), its content is read fresh at spawn time and
-# run in the guest as a script; otherwise the value itself is run verbatim
-# as a shell command. Either way it runs over SSH as the regular guest
-# user, with /workspace as the working directory, once the guest bootstrap
-# above (dotfiles sync, zsh handoff, token forwarding, Atlassian MCP
-# registration) has completed. Runs once per worktree: for both a
-# brand-new branch+worktree and "attach" (an existing branch getting a new
-# worktree), but not "resume" (reusing a worktree left behind by a prior
+# the host (sandbox_post_create_resolve, sandbox/lib/post_create.sh -- a
+# relative value against the repo root, an absolute one as-is, so the
+# script can live outside the repo being spawned), its content is read
+# fresh at spawn time and run in the guest as a script; otherwise the value
+# itself is run verbatim as a shell command. Either way it runs over SSH as
+# the regular guest user, with /workspace as the working directory, once
+# the guest bootstrap above (dotfiles sync, zsh handoff, token forwarding,
+# Atlassian MCP registration) has completed. Runs once per worktree: for
+# both a brand-new branch+worktree and "attach" (an existing branch getting
+# a new worktree), but not "resume" (reusing a worktree left behind by a prior
 # teardown), since that worktree's on-disk state -- including anything a
 # prior `--post-create` already installed -- persists across teardown. A
 # non-zero exit aborts pj-sbx-spawn immediately, leaving the

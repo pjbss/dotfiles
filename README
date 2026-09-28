@@ -145,8 +145,9 @@ credentials.
 
 The shape of a task: spawn a sandbox, plan inside it with you in the loop, let
 the agents implement the plan while you do something else, then review the
-result one commit at a time. Steps 3 and 5 are the ones with a human in them --
-everything else is mechanical.
+result one commit at a time. Steps 3 and 5 are the ones with a human in them,
+and `issues/manual-tests.md` is what connects them: step 3 writes down what only
+a person can check, step 5 is where you check it. Everything else is mechanical.
 
 **1. Spawn a sandbox, from the repo you want to work on.**
 
@@ -179,7 +180,13 @@ entry, and copied a `.code-workspace` file across if the repo has one.
 
 This is the part worth your attention. Everything downstream is only as good as
 the acceptance criteria written here, and they're much cheaper to fix now than
-after five commits have been built on them. Then sanity-check the result:
+after five commits have been built on them.
+
+Acceptance criteria are only the things a test can prove. Anything that needs a
+person -- a visual check, driving a real terminal -- is kept out of the issues
+and collected in `issues/manual-tests.md`, because an issue holding a box no
+agent can tick never completes, and stalls the whole queue behind it. That file
+is the checklist for step 5. Then sanity-check the result:
 
     $ pj-issues validate    # sections present, blockers real, no cycles
     $ pj-issues list        # what's ready, what's blocked on what
@@ -202,8 +209,9 @@ where you find out. Then let it drain:
 Per issue it implements test-first via `pj-tdd`, runs `make test`, reviews the
 work with `pj-review` in a separate process, and commits it via `pj-commit`
 only once that review approves. It stops at the first thing that isn't clean
-rather than building on top of it -- a red suite, an issue `pj-tdd` left for a
-human, an issue that changed nothing, or a second `changes-requested`.
+rather than building on top of it -- a red suite, an issue needing the real
+non-sandboxed environment (which `pj-tdd` refuses to touch and leaves for a
+human), an issue that changed nothing, or a second `changes-requested`.
 
 Nothing is committed before it has been reviewed. The implementing agent leaves
 its work in the working tree; the loop stages it, gates it, has it reviewed, and
@@ -299,11 +307,14 @@ loop dies mid-issue, where `pj-run-issues` in the VM under tmux doesn't care.
     $ git log --oneline master..            # one commit per issue (or main..)
     $ git show <sha>                        # review them one at a time
     $ cat issues/reviews/001-*.md           # what the reviewer found
+    $ cat issues/manual-tests.md            # the checks no test could make
     $ pj-issues status                      # what's done, what's left
 
-Run the app, click around, do the things automated tests don't cover. If
-something needs changing, go back into the sandbox and fix it there, or fix it
-on the host -- it's the same worktree either way.
+`issues/manual-tests.md` is what planning set aside for you in step 3, one
+entry per check, each naming the issue it came from. Work through it: that list
+is the difference between a green suite and a verified branch. If something
+needs changing, go back into the sandbox and fix it there, or fix it on the
+host -- it's the same worktree either way.
 
 **6. Push, then tear down.**
 
@@ -337,8 +348,10 @@ later with everything where you left it.
     will run an unattended agent. See Containment below.
   - `--post-create <path-or-command>` runs once per worktree, in the guest,
     with `/workspace` as the working directory, after the guest bootstrap. If
-    the value names a file relative to the repo root it's read fresh and run
-    as a script; otherwise it runs verbatim as a shell command.
+    the value names an existing file -- a relative path resolved against the
+    repo root, an absolute one used as-is, so a script shared across projects
+    can live outside the repo being spawned -- it's read fresh and run as a
+    script; otherwise it runs verbatim as a shell command.
 - `pj-sbx-list` -- lists every sandbox this tooling knows about (task
   name, worktree path, running/stopped).
 - `pj-sbx-teardown <task-name>` -- stops and deletes the VM. The
@@ -433,9 +446,12 @@ raw stream is archived unmodified beside the rendered log, so the rendering is
 never the only surviving record.
 
 It stops on the first thing that doesn't go cleanly rather than pressing on:
-a red suite, an issue `pj-tdd` left for a human, an issue that produced no
-commit, a leftover dirty tree, a second `changes-requested`. Everything lands
-in `issues/runs/<timestamp>/`.
+a red suite, an issue `pj-tdd` left for a human because finishing it would mean
+acting on the real non-sandboxed environment, an issue that produced no commit,
+a leftover dirty tree, a second `changes-requested`. Everything lands in
+`issues/runs/<timestamp>/`. A criterion that merely needs human *eyes* is not
+on that list: it belongs in `issues/manual-tests.md`, and the run ends by
+pointing there.
 
 Two things make this safe enough to leave alone. `make test` is the gate -- the
 `Stop` hook refuses to let a session finish while it's red -- and the loop

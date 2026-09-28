@@ -40,6 +40,14 @@ wrong precisely enough that the next pass can fix it.
    is the single most valuable thing this review does: nothing else in the
    pipeline distinguishes "built and verified" from "marked done".
 
+   Two related cases, checked here too. A criterion no automated test
+   *could* prove never belonged in the issue — it belonged in
+   `issues/manual-tests.md`, and leaving it as a criterion is what stalls an
+   unattended run. And when `## Resolution notes` says a criterion was moved
+   to that file, open the file and confirm the entry is really there:
+   otherwise "moved to manual tests" is a way to retire a criterion nobody
+   ever verified.
+
 4. Then review the change on its own merits, in this order:
    - **Correctness**: what input or state makes this behave wrong? Prefer one
      concrete failing scenario to a general worry.
@@ -88,7 +96,9 @@ first, exact, and lowercase-hyphenated. Then:
 ```
 
 Use `changes-requested` for: a failing or unrun test suite, an unsupported
-acceptance criterion, a correctness bug, or a reversed PRD decision. Style
+acceptance criterion, an acceptance criterion no test could prove, a
+criterion the resolution notes claim was moved to `issues/manual-tests.md`
+that isn't there, a correctness bug, or a reversed PRD decision. Style
 preferences alone are not grounds for it — note them under Findings and
 approve.
 

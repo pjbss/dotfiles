@@ -695,3 +695,11 @@ echo
 "$BIN_DIR/pj-issues" status
 echo
 say "review the branch one commit at a time: git log --oneline $(git rev-parse --short HEAD)"
+
+# A run that ends clean reads as a fully verified branch, and it isn't one when
+# the plan deliberately set checks aside for a person. The loop can't run them
+# -- that's what makes them manual -- so the least it can do is refuse to let
+# them be forgotten on the way out.
+if [ -f issues/manual-tests.md ]; then
+	say "then work through the checks no test can make: issues/manual-tests.md"
+fi

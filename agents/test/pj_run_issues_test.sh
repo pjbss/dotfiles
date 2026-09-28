@@ -517,4 +517,28 @@ if out="$(cd "$repo" && PATH="$stub_bin:$PATH" PJ_SANDBOX_MARKER="$marker" \
 	PJ_CLAUDE_ARGS="--output-format json" NO_COLOR=1 "$RUN_ISSUES" --plain 2>&1)"; then rc=0; else rc=$?; fi
 assert_exit_code 0 "$rc" "--plain makes that override allowed again, since nothing is rendering"
 
+# === the manual test plan pointer ===========================================
+
+# A clean run reads as a verified branch, and it isn't one when planning set
+# checks aside for a person. Nothing else in the output would say so.
+repo="$(make_repo nomanualtests 1)"
+run_loop "$repo"
+assert_exit_code 0 "$rc" "a run without a manual test plan exits 0"
+assert_not_contains "$out" "manual-tests.md" \
+	"nothing is said about a manual test plan that was never written"
+
+repo="$(make_repo manualtests 1)"
+printf '# Manual test plan\n\n## MT-1 -- it renders\n' > "$repo/issues/manual-tests.md"
+run_loop "$repo"
+assert_exit_code 0 "$rc" "a manual test plan doesn't change how the run exits"
+assert_contains "$out" "issues/manual-tests.md" \
+	"the summary points at the checks no test can make"
+assert_contains "$out" "no test can make" "and says why they're listed separately"
+# It sits in issues/ beside the PRD, so it is neither queued as work nor
+# committed with it.
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" \
+	"the manual test plan is not committed with the issue"
+assert_ok "the manual test plan is never picked up as an issue" \
+	test -f "$repo/issues/manual-tests.md"
+
 assert_report

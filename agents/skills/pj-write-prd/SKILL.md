@@ -59,6 +59,12 @@ State explicitly what testing approach applies to this effort (e.g. TDD
 per issue via `pj-tdd`, or a deliberate decision to skip automated tests
 and why). Don't leave this implicit.
 
+Then state what about this effort can only be confirmed by a person — a
+visual check, driving a real terminal session, anything no test can assert.
+Those go into `issues/manual-tests.md` when `pj-plan-issues` runs, never into
+an issue's acceptance criteria: an issue carrying a criterion no agent can
+check never completes unattended, and stalls the whole queue behind it.
+
 ## Out of Scope
 
 - Things considered and explicitly excluded, and why — so the next reader

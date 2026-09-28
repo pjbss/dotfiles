@@ -26,14 +26,26 @@ one out of order.
    touching code.
 3. Identify the discrete list of behaviors that need a test, mapped 1:1 to
    the acceptance criteria wherever possible.
-4. Check whether this issue is actually implementable unattended. Flag
-   (and stop, without touching real system state) any acceptance criteria
-   that require acting on the real, non-sandboxed environment (a real
-   `$HOME`, real cloud resources, anything standing guidance says must be
-   sandboxed instead) or that require a human physically validating
-   something (a visual UI check, driving a real terminal session). Do the
-   safe portions and clearly list what's left for a human, rather than
-   forcing those parts through.
+4. Check whether this issue is actually implementable unattended. Two
+   different cases hide here, and they are handled differently:
+
+   - **Acting on the real, non-sandboxed environment** (a real `$HOME`,
+     real cloud resources, anything standing guidance says must be
+     sandboxed instead): do the safe portions, stop without touching real
+     system state, and clearly list what's left for a human. Never force
+     those parts through.
+   - **A criterion only a person can confirm** (a visual UI check, driving
+     a real terminal session): don't stop for it. `pj-plan-issues` is
+     supposed to have kept these out of acceptance criteria and put them in
+     `issues/manual-tests.md`; one that slipped through gets moved there
+     now. Delete the criterion from the issue's `## Acceptance criteria` and
+     append it to `issues/manual-tests.md` as the next `MT-N` entry, in the
+     shape the entries already there use: a `## MT-N — <short name>`
+     heading, a `Source:` line naming this issue, numbered steps, and a
+     bolded `**Expect:**` line saying what passing looks like. Create the
+     file with a `# Manual test plan` heading if it doesn't exist yet, and
+     continue its numbering if it does. Then carry on — build the behavior
+     as normal, only its *verification* moves.
 
 ## Red-green-refactor loop
 
@@ -54,10 +66,17 @@ Repeat per behavior identified above:
   section describing what was actually built/decided (especially anything
   that deviated from the original "What to build"), then move the file
   into `issues/done/`. The `issues` directory may not be in git source control, so you must move the file via `mv` rather than `git mv`.
-- **Partial completion** (some criteria are HITL-only per the flag above):
+  Any criterion moved to `issues/manual-tests.md` is *removed* from the
+  issue, not left behind as an unchecked `- [ ]` — say so in the resolution
+  notes, naming the `MT-N` entry it became. An unchecked box on an issue in
+  `issues/done/` is what `pj-issues validate` fails on, and it would be
+  lying about the state of the work besides.
+- **Partial completion** (real-environment criteria per the first case
+  above — never merely because something needs a human to *look* at it):
   leave those specific boxes unchecked, add a `## Notes (autonomous pass,
   <date>)` section explaining exactly what's left and why, and leave the
   file in `issues/` (not `issues/done/`) until a human finishes the rest.
+  This is what stops an unattended run, deliberately.
 
 Never invent acceptance criteria that aren't in the issue file. If the
 issue turns out to be missing something essential to build it correctly,

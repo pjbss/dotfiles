@@ -83,6 +83,41 @@ assert_eq "$(cat "$fixture_repo/$script_relative_path")" \
 	"$(sandbox_post_create_resolve "$script_relative_path" "$fixture_repo")" \
 	"sandbox_post_create_resolve resolves against the given repo root, not the process's cwd"
 
+# --- an absolute path is used as-is, not joined to the repo root ---
+#
+# A --post-create script doesn't have to live inside the repo being spawned:
+# this dotfiles checkout (local/sandbox/post-create/) is a natural home for
+# one shared across projects, and it's only ever reachable from another
+# repo's spawn as an absolute path. $other_dir stands in for that -- it's
+# deliberately not under $fixture_repo, so joining it to the repo root the
+# way a relative value is joined would resolve to nothing and silently
+# degrade the script into a verbatim shell command.
+
+absolute_script="$other_dir/absolute-setup.sh"
+printf '#!/bin/sh\ncd webtools\nmake test\n' > "$absolute_script"
+
+if resolved_absolute="$(sandbox_post_create_resolve "$absolute_script" "$fixture_repo")"; then
+	echo "PASS: sandbox_post_create_resolve returns 0 (script) for an absolute path outside the repo root"
+else
+	echo "FAIL: sandbox_post_create_resolve returns 0 (script) for an absolute path outside the repo root"
+	failures=$((failures + 1))
+fi
+
+assert_eq "$(cat "$absolute_script")" "$resolved_absolute" \
+	"sandbox_post_create_resolve prints the absolute path's file content, resolved as-is rather than against the repo root"
+
+# --- a nonexistent absolute path still falls back to a verbatim command ---
+
+if sandbox_post_create_resolve "/no/such/script.sh" "$fixture_repo" >/dev/null; then
+	echo "FAIL: sandbox_post_create_resolve returns 1 (command) for a nonexistent absolute path"
+	failures=$((failures + 1))
+else
+	echo "PASS: sandbox_post_create_resolve returns 1 (command) for a nonexistent absolute path"
+fi
+
+assert_eq "/no/such/script.sh" "$(sandbox_post_create_resolve "/no/such/script.sh" "$fixture_repo" || true)" \
+	"sandbox_post_create_resolve prints a nonexistent absolute path's value unchanged, as a literal command"
+
 rm -rf "$fixture_repo" "$other_dir"
 
 echo "$failures failure(s)"
