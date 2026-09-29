@@ -13,9 +13,11 @@
 # there runs on the *host*, as the host user, the next time a host-side git
 # command touches the repo -- and `config` can redirect core.hooksPath, install
 # a filter.*.clean/smudge command, or point a remote's url at an `ext::`
-# transport, each of which also ends in host command execution. Neither file is
-# touched by any legitimate agent activity: committing, branching, fetching and
-# merging all write only to objects/ and refs/.
+# transport, each of which also ends in host command execution. No legitimate
+# agent activity touches hooks/, and committing, branching, fetching and merging
+# write only to objects/ and refs/. The exception is config's per-branch
+# bookkeeping (upstream tracking, editor metadata), which is written all the
+# time and is filtered out before hashing -- see _sandbox_gitdir_config_sha.
 #
 # So rather than trying to make the mount read-only (which would break git) or
 # relying on a guest-side rule (which an agent with root in the VM can simply
@@ -63,6 +65,63 @@ _sandbox_gitdir_sha_batch() {
 	fi
 }
 
+# _sandbox_gitdir_config_sha CONFIG_FILE
+#
+# Echoes the SHA-256 of CONFIG_FILE's *security-relevant* content, rather than
+# of its raw bytes.
+#
+# Hashing the raw file made the guard fail on nearly every teardown for no
+# reason: editors rewrite per-branch keys in the shared config constantly --
+# VS Code's git and GitHub PR extensions set branch.<name>.vscode-merge-base
+# and branch.<name>.github-pr-* on every checkout, and `git push -u` from
+# inside the guest sets branch.<name>.remote/merge. A real repo's config was
+# seen at 1,200+ lines, almost all of them exactly those keys. None of them can
+# make git run anything, so they're filtered out before hashing:
+#
+#   branch.*.merge, branch.*.description, branch.*.vscode-*, branch.*.github-pr-*
+#   branch.*.remote / pushremote -- only when the value is a plain remote name.
+#     A URL there (`ext::sh -c ...`) is fetched from directly, so any value
+#     containing `:` or `/` stays covered.
+#
+# Everything else -- core.*, filter.*, remote.*, include*, alias.*, and any
+# branch.* key not listed above -- is hashed in file order, so adding,
+# changing or removing it still fails verification.
+#
+# Parsed with `git config --file ... --list`, which only reads (nothing in a
+# config file executes on read). If git can't parse the file at all, the raw
+# bytes are hashed instead, so a malformed config registers as a change rather
+# than as an empty -- and therefore matching -- view.
+_sandbox_gitdir_config_sha() {
+	if listing="$(git config --file "$1" --list 2>/dev/null)"; then
+		printf '%s\n' "$listing" | awk '
+			{
+				eq = index($0, "=")
+				if (eq > 0 && substr($0, 1, 7) == "branch.") {
+					key = substr($0, 1, eq - 1)
+					value = substr($0, eq + 1)
+					n = split(key, parts, ".")
+					var = parts[n]
+					if (var == "merge" || var == "description" || var ~ /^vscode-/ || var ~ /^github-pr-/)
+						next
+					if ((var == "remote" || var == "pushremote") && value ~ /^[A-Za-z0-9._-]+$/)
+						next
+				}
+				print
+			}
+		' | _sandbox_gitdir_sha_stdin
+	else
+		_sandbox_gitdir_sha "$1"
+	fi
+}
+
+_sandbox_gitdir_sha_stdin() {
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 | awk '{print $1}'
+	else
+		sha256sum | awk '{print $1}'
+	fi
+}
+
 # sandbox_gitdir_manifest GITDIR
 #
 # Prints the manifest for GITDIR: one `<sha256>  <relative path>` line per
@@ -71,7 +130,8 @@ _sandbox_gitdir_sha_batch() {
 #
 # Covered: `config`, every file under `hooks/`, and every per-worktree
 # `config.worktree` (a worktree-scoped config override is just as good a place
-# to hide a filter command as the main one). A file's *absence* is recorded too
+# to hide a filter command as the main one). Both config kinds are hashed
+# through _sandbox_gitdir_config_sha, not byte-for-byte. A file's *absence* is recorded too
 # -- as an `absent` line -- so that deleting `config` registers as a change
 # rather than as a shorter, quietly-matching manifest.
 sandbox_gitdir_manifest() {
@@ -80,7 +140,7 @@ sandbox_gitdir_manifest() {
 
 	{
 		if [ -f "$gitdir/config" ]; then
-			printf '%s  %s\n' "$(_sandbox_gitdir_sha "$gitdir/config")" config
+			printf '%s  %s\n' "$(_sandbox_gitdir_config_sha "$gitdir/config")" config
 		else
 			printf 'absent  %s\n' config
 		fi
@@ -106,13 +166,15 @@ sandbox_gitdir_manifest() {
 			printf 'absent  hooks/\n'
 		fi
 
-		{ find "$gitdir/worktrees" -maxdepth 2 -name config.worktree -type f -print0 2>/dev/null || true; } \
-			> "$file_list"
-
-		if [ -s "$file_list" ]; then
-			_sandbox_gitdir_sha_batch < "$file_list" |
-				awk '{ n = split($0, parts, "/"); print $1 "  worktrees/" parts[n - 1] "/config.worktree" }'
-		fi
+		# One process per file here, unlike hooks/ above, because each one is
+		# normalized the same way as the main config -- with
+		# extensions.worktreeConfig set, per-branch keys land here too. There's
+		# one of these per worktree that has one, not fifteen.
+		{ find "$gitdir/worktrees" -mindepth 2 -maxdepth 2 -name config.worktree -type f 2>/dev/null || true; } |
+		while IFS= read -r worktree_config; do
+			worktree_name="$(basename "$(dirname "$worktree_config")")"
+			printf '%s  %s\n' "$(_sandbox_gitdir_config_sha "$worktree_config")" "worktrees/$worktree_name/config.worktree"
+		done
 	} | sort -k2
 
 	rm -f "$file_list"

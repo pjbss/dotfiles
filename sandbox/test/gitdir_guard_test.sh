@@ -101,6 +101,56 @@ git -C "$repo_root" config --unset core.hooksPath
 verify_result "$gitdir" "$manifest"
 assert_exit_code 0 "$rc" "reverting the config change restores a clean verification"
 
+# --- per-branch bookkeeping in config is not tampering ---
+#
+# Regression test: the guard used to hash config byte-for-byte, so VS Code
+# writing branch.*.vscode-merge-base / github-pr-* on the host, or `git push -u`
+# in the guest, made every teardown refuse without --force.
+
+git -C "$repo_root" config branch.a-new-branch.remote origin
+git -C "$repo_root" config branch.a-new-branch.merge refs/heads/a-new-branch
+git -C "$repo_root" config branch.a-new-branch.vscode-merge-base origin/main
+git -C "$repo_root" config --add branch.a-new-branch.github-pr-owner-number "owner#repo#1"
+git -C "$repo_root" config branch.feature/with.dots.github-pr-base-branch "owner#repo#main"
+git -C "$repo_root" config branch.a-new-branch.description "some notes"
+verify_result "$gitdir" "$manifest"
+assert_exit_code 0 "$rc" "upstream tracking and editor branch metadata verify clean"
+assert_eq "" "$out" "branch bookkeeping produces no differences"
+
+git -C "$repo_root" config --remove-section branch.a-new-branch
+verify_result "$gitdir" "$manifest"
+assert_exit_code 0 "$rc" "removing branch bookkeeping verifies clean too"
+
+git -C "$repo_root" config branch.a-new-branch.remote 'ext::sh -c touch% /tmp/pwned'
+verify_result "$gitdir" "$manifest"
+assert_exit_code 1 "$rc" "a branch remote set to a URL rather than a remote name still fails verification"
+assert_contains "$out" "MODIFIED: config" "the URL-valued branch remote is reported"
+git -C "$repo_root" config --remove-section branch.a-new-branch
+
+git -C "$repo_root" config branch.a-new-branch.pushremote '/some/other/repo'
+verify_result "$gitdir" "$manifest"
+assert_exit_code 1 "$rc" "a branch pushremote set to a path still fails verification"
+git -C "$repo_root" config --remove-section branch.a-new-branch
+
+git -C "$repo_root" config filter.evil.clean 'touch /tmp/pwned'
+verify_result "$gitdir" "$manifest"
+assert_exit_code 1 "$rc" "a filter command still fails verification alongside the branch filtering"
+git -C "$repo_root" config --remove-section filter.evil
+
+git -C "$repo_root" config remote.evil.url 'ext::sh -c touch% /tmp/pwned'
+verify_result "$gitdir" "$manifest"
+assert_exit_code 1 "$rc" "a new remote still fails verification"
+git -C "$repo_root" config --remove-section remote.evil
+
+cp "$gitdir/config" "$fixture_root/config.bak"
+printf '[core\n\tbroken = \n' >> "$gitdir/config"
+verify_result "$gitdir" "$manifest"
+assert_exit_code 1 "$rc" "an unparseable config fails verification rather than reading as empty"
+mv "$fixture_root/config.bak" "$gitdir/config"
+
+verify_result "$gitdir" "$manifest"
+assert_exit_code 0 "$rc" "the config is back to its recorded state"
+
 # --- deleting a covered file is a change too ---
 
 sample_hook="$(find "$gitdir/hooks" -type f -name '*.sample' | head -1)"
