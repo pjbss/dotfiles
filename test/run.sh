@@ -8,7 +8,7 @@
 # call, which is what `make test` wraps.
 #
 # Test files are discovered, never enumerated, so a new one is picked up by
-# dropping it in any of the three test directories -- the same drop-in
+# dropping it in any of the test directories -- the same drop-in
 # convention as zsh/modules/ and sandbox/templates/. The `|| true` on the find
 # matters: not every one of those directories exists in every checkout, and a
 # find over a missing directory exits non-zero, which under `set -e` would
@@ -46,7 +46,7 @@ done
 
 cd "$DOTFILES_HOME"
 
-test_files="$(find sandbox/test zsh/modules/test agents/test -type f -name '*_test.sh' 2>/dev/null || true)"
+test_files="$(find sandbox/test zsh/modules/test agents/test pj-sandbox/test -type f -name '*_test.sh' 2>/dev/null || true)"
 test_files="$(printf '%s\n' "$test_files" | sed 's|^\./||' | sort)"
 
 if [ -n "$pattern" ]; then
