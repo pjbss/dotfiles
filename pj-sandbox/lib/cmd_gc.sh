@@ -5,7 +5,8 @@
 # Cleans up after sandboxes that crashed or were torn down by hand:
 #   - pjsb- Lima instances that no state record names are deleted
 #   - records whose instance Lima no longer has are deleted once their meta
-#     is older than PJ_SANDBOX_GC_GRACE_MINUTES (default 60)
+#     is older than PJ_SANDBOX_GC_GRACE_MINUTES (default 60), and the egress
+#     proxy each one names is stopped first
 #   - pjsb- Host entries in the include file that no remaining record names
 #     are removed
 # Everything is decided from one `limactl list --json` call, and gc refuses
@@ -17,6 +18,7 @@
 . "$PJ_SANDBOX_HOME/lib/state.sh"
 . "$PJ_SANDBOX_HOME/lib/lima.sh"
 . "$PJ_SANDBOX_HOME/lib/ssh_config.sh"
+. "$PJ_SANDBOX_HOME/lib/proxy.sh"
 
 PJ_SANDBOX_GC_GRACE_MINUTES="${PJ_SANDBOX_GC_GRACE_MINUTES:-60}"
 
@@ -86,6 +88,7 @@ cmd_gc() {
 
 	for task in $stale; do
 		if [ "$dry_run" = no ]; then
+			pj_sandbox_proxy_stop "$task" || return 1
 			rm -rf "${PJ_SANDBOX_STATE_DIR:?}/$task" || return 1
 		fi
 		echo "$verb state $task"

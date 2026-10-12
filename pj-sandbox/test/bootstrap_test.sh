@@ -18,6 +18,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PJ_SANDBOX_DIR="$(cd -P "$TEST_DIR/.." && pwd)"
 . "$TEST_DIR/../../test/assert.sh"
+. "$TEST_DIR/stub_proxy.sh"
 
 CLI="$PJ_SANDBOX_DIR/bin/pj-sandbox"
 
@@ -67,13 +68,19 @@ shift # host
 tee "$STUB_DIR/ssh-stdin.$n" | HOME="$GUEST_ROOT/home" PATH="$GUEST_BIN:$PATH" sh -c "$*"
 STUB
 
-# The guest's sudo: `tee FILE` and `mkdir -p DIR` land under GUEST_ROOT,
-# anything else is only recorded.
+# The guest's sudo: `tee [-a] FILE` (making FILE's dir) and `mkdir -p DIR`
+# land under GUEST_ROOT, anything else is only recorded.
 cat > "$GUEST_BIN/sudo" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$STUB_DIR/sudo-calls"
 case "$1" in
-	tee) cat > "$GUEST_ROOT$2" ;;
+	tee)
+		if [ "$2" = -a ]; then
+			mkdir -p "$(dirname "$GUEST_ROOT$3")" && cat >> "$GUEST_ROOT$3"
+		else
+			mkdir -p "$(dirname "$GUEST_ROOT$2")" && cat > "$GUEST_ROOT$2"
+		fi
+		;;
 	mkdir) mkdir -p "$GUEST_ROOT$3" ;;
 esac
 STUB
@@ -82,6 +89,9 @@ cat > "$GUEST_BIN/zsh" <<'STUB'
 echo "ZSH-HANDOFF $*"
 STUB
 chmod +x "$fixture/bin/"* "$GUEST_BIN/"*
+# spawn starts the task's proxy; a stub stands in for mitmdump.
+pj_test_stub_proxy "$fixture/bin"
+export PJ_SANDBOX_PROXY_SETTLE=0
 export PATH="$fixture/bin:$PATH"
 
 # The dotfiles: one tracked file, a fake installer, and a gitignored secret.
@@ -148,6 +158,20 @@ assert_contains "$login_out" "ZSH-HANDOFF -l" "a top-level login hands off to 'z
 assert_not_contains "$login_out" "NO-HANDOFF" "the handoff is an exec"
 child_out="$(env -u ZSH_VERSION PJSANDBOX_ZSH_HANDED_OFF=1 PATH="$GUEST_BIN:$PATH" sh -c '. "$1"; echo NO-HANDOFF' sh "$profile" 2>&1 || true)"
 assert_eq "NO-HANDOFF" "$child_out" "a shell that inherited the marker doesn't hand off again"
+
+# --- the bootstrap points the guest at the task's proxy ---
+
+proxy_port="$(sed -n 's/^proxy_port=//p' "$HOME/.local/state/pj-sandbox/boot/meta")"
+proxy_profile="$GUEST_ROOT/etc/profile.d/pjsb-proxy.sh"
+assert_ok "the guest gets /etc/profile.d/pjsb-proxy.sh" test -f "$proxy_profile"
+assert_eq "http://192.168.106.1:$proxy_port|http://192.168.106.1:$proxy_port|localhost,127.0.0.1,::1|" \
+	"$(env -i sh -c '. "$1"; printf "%s|%s|%s|%s" "$HTTPS_PROXY" "$http_proxy" "$NO_PROXY" "${PJSB_PROXY:-}"' sh "$proxy_profile")" \
+	"a login shell sourcing it gets the task's proxy, and no leftover helper variables"
+assert_contains "$(cat "$GUEST_ROOT/etc/environment" 2>/dev/null || true)" "HTTPS_PROXY=http://192.168.106.1:$proxy_port" \
+	"/etc/environment carries the proxy for PAM sessions"
+assert_contains "$(cat "$GUEST_ROOT/etc/apt/apt.conf.d/95pjsb-proxy" 2>/dev/null || true)" \
+	"Acquire::https::Proxy \"http://192.168.106.1:$proxy_port\";" "apt goes through the proxy"
+assert_contains "$(cat "$STUB_DIR/sudo-calls")" "systemctl enable --now pjsb-egress-lockdown.service" "the lockdown unit is enabled"
 
 # --- the bootstrap trusts the proxy CA's certificate, never its key ---
 

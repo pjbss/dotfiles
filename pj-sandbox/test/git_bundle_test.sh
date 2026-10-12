@@ -12,6 +12,7 @@ set -euo pipefail
 TEST_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PJ_SANDBOX_DIR="$(cd -P "$TEST_DIR/.." && pwd)"
 . "$TEST_DIR/../../test/assert.sh"
+. "$TEST_DIR/stub_proxy.sh"
 
 CLI="$PJ_SANDBOX_DIR/bin/pj-sandbox"
 
@@ -74,6 +75,9 @@ cat > /dev/null
 STUB
 chmod +x "$fixture/bin/ssh"
 export PJ_SANDBOX_DOTFILES_HOME="$fixture/repo"
+# spawn starts the task's proxy; a stub stands in for mitmdump.
+pj_test_stub_proxy "$fixture/bin"
+export PJ_SANDBOX_PROXY_SETTLE=0
 export PATH="$fixture/bin:$PATH"
 
 repo="$fixture/repo"

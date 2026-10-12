@@ -12,13 +12,7 @@
 . "$PJ_SANDBOX_HOME/lib/lima.sh"
 . "$PJ_SANDBOX_HOME/lib/ssh_config.sh"
 . "$PJ_SANDBOX_HOME/lib/cmd_fetch.sh"
-
-# pj_sandbox_proxy_stop TASK
-#
-# Stops TASK's egress proxy. There's no proxy yet (issue 023), so a no-op.
-pj_sandbox_proxy_stop() {
-	:
-}
+. "$PJ_SANDBOX_HOME/lib/proxy.sh"
 
 cmd_rm() {
 	task=""

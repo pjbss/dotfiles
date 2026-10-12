@@ -23,6 +23,17 @@ ssh:
 
 mounts: []
 
+# The egress enforcement point, copied from lima/spike/vmnet-hostonly.yaml
+# (pj-sandbox/docs/spike-egress.md, "Findings"). lima0 sits on socket_vmnet's
+# host-only network, which has no route off the Mac; the task's proxy listens
+# on the host's address there. The guest bootstrap removes eth0's default
+# route once provisioning is done. QEMU, as in the spike: ssh rides eth0's
+# hostfwd, so eth0 itself stays.
+vmType: qemu
+
+networks:
+- lima: host
+
 __PJ_SANDBOX_PORT_FORWARDS__
 
 __PJ_SANDBOX_BASE_PROVISION__

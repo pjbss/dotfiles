@@ -73,7 +73,7 @@ These rules keep the old and new tooling from interfering while both exist:
 
 Each task's record is `<state dir>/<task>/meta`: `key=value` lines (task,
 instance, repo, branch, base, agents, ssh_port, ports, created, fetched,
-egress_mode)
+egress_mode, proxy_port, proxy_pid)
 written by `lib/state.sh` through a temp file and `mv`, so a reader never sees
 a half-written record. This file is the only thing that says a task exists.
 Neither ssh include file is ever read to find tasks.
@@ -86,7 +86,7 @@ as `unknown`. JSON fields are all strings.
 
 ## Spawning
 
-`pj-sandbox spawn <task> --base none [--ports 8000,5432]` boots
+`pj-sandbox spawn <task> --base none [--ports 8000,5432] [--egress deny|observe|open]` boots
 `pjsb-<slug>` from `lima/template.yaml` with no host mounts. It writes a
 `Host pjsb-<slug>` entry to the include file (never to the old
 `~/.ssh/pj-sandbox-config`), makes sure `~/.ssh/config` includes that file,
@@ -98,6 +98,33 @@ has a record is refused before `limactl` is called.
 
 `--base` names a template from `templates/` (`none`, `python3.12`,
 `python3.14`) or from the local templates dir, which wins a name collision.
+
+### Egress
+
+Every VM gets the network that `docs/spike-egress.md` ("Findings") chose:
+`vmType: qemu` plus a NIC on Lima's socket_vmnet `host` network (`lima0`,
+192.168.106.0/24), which has no route off the Mac. Once the VM is up, spawn
+starts the task's own `mitmdump` (`lib/proxy.sh`) on
+`$PJ_SANDBOX_PROXY_HOST` (default `192.168.106.1`, the host's address on that
+network; a wildcard address is refused). It listens on a port from the
+pj-sandbox range. The proxy loads `proxy/addon.py` with the task's `policy/`
+dir and `--egress deny|observe|open` (default `deny`), and the tokens
+`lib/tokens.sh` resolves go into its environment. Its log is
+`<state dir>/<task>/egress.log`, and mitmdump's own output goes to
+`proxy.log` beside it. The record gains `egress_mode`, `proxy_port` and
+`proxy_pid`. Any failure after the proxy starts stops it again. Install
+socket_vmnet and give Lima's `networks.yaml` the right `group:` first, as
+for the spike (MT-4).
+
+The bootstrap's last step points the guest at the proxy. It sets
+`HTTP(S)_PROXY`/`NO_PROXY` in `/etc/profile.d/pjsb-proxy.sh` and
+`/etc/environment`, sets apt's proxy, and writes `"proxies"` into
+`/etc/docker/daemon.json`. Then it enables `pjsb-egress-lockdown.service`,
+which deletes `eth0`'s default route at every boot and blackholes Lima's
+resolver (192.168.5.3). The guest has no DNS of its own, because the proxy
+resolves names. All of that is inside the guest, so root can undo it. That's
+the known gap the findings accepted, along with guests sharing one host-only
+network.
 `pj-sandbox spawn --base list` prints the valid names, and `--help` and an
 unknown `--base` show them too. The format is the old sandbox's: a flat file
 of Lima `provision:` items, or a directory holding `provision.yaml` and a
@@ -195,7 +222,8 @@ or `open-mode`).
 
 A denied request or CONNECT gets a 403 with a one-line reason. A malformed
 allowlist or an unknown mode stops mitmdump from starting, and an error while
-deciding denies the request. `spawn` doesn't start the proxy yet.
+deciding denies the request. `spawn` starts one per task (see "Egress"
+under "Spawning").
 
 ### Reading the log and building an allowlist
 
@@ -313,7 +341,8 @@ VM Lima doesn't report as `Running`, before calling ssh.
 
 `pj-sandbox rm <task> [--fetch]` removes one task. With `--fetch` it runs
 `fetch` first and stops if the fetch fails. It then stops the task's proxy
-(a no-op until the proxy exists), runs `limactl delete --force pjsb-<slug>`
+(only the recorded PID, and only while that is still the task's mitmdump),
+runs `limactl delete --force pjsb-<slug>`
 if Lima still has the VM, drops that one Host block from
 `~/.ssh/pj-sandbox-next-config`, and deletes the task's state dir. The host
 branch and `refs/sandbox/<task>/*` are kept. It refuses a record whose
@@ -321,7 +350,8 @@ instance lacks the `pjsb-` prefix, and does nothing if `limactl list` fails.
 
 `pj-sandbox gc [--dry-run]` cleans up after crashes. It deletes `pjsb-*` VMs
 that no record names. It deletes records whose VM is gone once their `meta`
-is older than `PJ_SANDBOX_GC_GRACE_MINUTES` (default 60). It removes `pjsb-`
+is older than `PJ_SANDBOX_GC_GRACE_MINUTES` (default 60), stopping each
+one's proxy first. It removes `pjsb-`
 Host entries that no remaining record names. It works from one
 `limactl list --json` call and refuses to run without it, and it never sees
 instances outside the `pjsb-` prefix. `--dry-run` prints the

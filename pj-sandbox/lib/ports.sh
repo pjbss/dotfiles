@@ -12,13 +12,15 @@
 # pj_sandbox_used_ports
 #
 # Prints every host port a state record holds, one per line: each record's
-# ssh_port plus the host side of each guest:host pair in its ports field.
+# ssh_port and proxy_port, plus the host side of each guest:host pair in its
+# ports field.
 # A subshell, so its loop variable can't clobber a caller's (spawn's own
 # $task among them); task names are read a line at a time since they may
 # hold spaces.
 pj_sandbox_used_ports() (
 	pj_sandbox_state_tasks | while IFS= read -r task; do
 		pj_sandbox_state_get "$task" ssh_port
+		pj_sandbox_state_get "$task" proxy_port
 		pj_sandbox_state_get "$task" ports | tr ',' '\n' | sed -n 's/^[0-9]*://p'
 	done | grep -E '^[0-9]+$' || true
 )

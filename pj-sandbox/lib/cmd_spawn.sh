@@ -1,6 +1,6 @@
 # cmd_spawn.sh
 #
-# pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>]
+# pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open]
 # pj-sandbox spawn --base list | --help
 #
 # Run inside a git repo. Makes or reuses the host branch TASK (a new one
@@ -22,6 +22,11 @@
 # the proxy, and their post-bootstrap.sh scripts run after the bootstrap. A
 # directory template's `allowlist` and the repo's
 # <git common dir>/pj-sandbox/allowlist are merged in after the profiles'.
+# Once the VM is up, spawn starts the task's egress proxy (lib/proxy.sh) in
+# --egress mode (default deny) on the host-only network that is the guest's
+# only route, and the bootstrap points the guest at it and closes the rest
+# (pj-sandbox/docs/spike-egress.md, "Findings"). The proxy's PID, port and
+# mode go in the state record, and a failure after it starts stops it.
 
 . "$PJ_SANDBOX_HOME/lib/namespace.sh"
 . "$PJ_SANDBOX_HOME/lib/state.sh"
@@ -33,6 +38,8 @@
 . "$PJ_SANDBOX_HOME/lib/base_template.sh"
 . "$PJ_SANDBOX_HOME/lib/profiles.sh"
 . "$PJ_SANDBOX_HOME/lib/ca.sh"
+. "$PJ_SANDBOX_HOME/lib/tokens.sh"
+. "$PJ_SANDBOX_HOME/lib/proxy.sh"
 
 # Where the bundle lands in the guest, and where it's cloned to.
 PJ_SANDBOX_GUEST_WORKSPACE=/workspace
@@ -44,7 +51,7 @@ PJ_SANDBOX_BUILTIN_TEMPLATES_DIR="$PJ_SANDBOX_HOME/templates"
 PJ_SANDBOX_PROFILES_DIR="$PJ_SANDBOX_HOME/profiles"
 
 _pj_sandbox_spawn_usage() {
-	echo "Usage: pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>]" >&2
+	echo "Usage: pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open]" >&2
 }
 
 _pj_sandbox_spawn_names_block() {
@@ -83,11 +90,23 @@ _pj_sandbox_spawn_drop_bundle() {
 
 # _pj_sandbox_spawn_abort
 #
-# Undoes spawn's host-side files after a failure before the VM is cloned:
-# the bundle, the merged policy, and the state dir they leave empty.
+# Undoes spawn's host-side work after a failure before the VM is cloned:
+# the proxy, if it was started, the bundle, the merged policy and the
+# proxy's logs, and the state dir they leave empty.
 _pj_sandbox_spawn_abort() {
+	_pj_sandbox_spawn_stop_proxy
 	rm -rf "$PJ_SANDBOX_STATE_DIR/$task/policy"
+	rm -f "$PJ_SANDBOX_STATE_DIR/$task/egress.log" "$PJ_SANDBOX_STATE_DIR/$task/proxy.log"
 	_pj_sandbox_spawn_drop_bundle
+}
+
+# _pj_sandbox_spawn_stop_proxy
+#
+# Stops the proxy this spawn started, if any. With no record written yet,
+# nothing else would ever find it.
+_pj_sandbox_spawn_stop_proxy() {
+	pj_sandbox_proxy_kill "$proxy_pid" "$PJ_SANDBOX_STATE_DIR/$task/policy"
+	proxy_pid=""
 }
 
 cmd_spawn() {
@@ -96,10 +115,11 @@ cmd_spawn() {
 	base=""
 	guest_ports=""
 	from=""
+	egress_mode=deny
 	agents_csv="$(pj_sandbox_profile_names "$PJ_SANDBOX_PROFILES_DIR" | paste -sd , -)"
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--base | --ports | --from | --agent)
+			--base | --ports | --from | --agent | --egress)
 				if [ "$#" -lt 2 ]; then
 					_pj_sandbox_spawn_usage
 					return 1
@@ -109,6 +129,7 @@ cmd_spawn() {
 					--ports) guest_ports="$2" ;;
 					--from) from="$2" ;;
 					--agent) agents_csv="$2" ;;
+					--egress) egress_mode="$2" ;;
 				esac
 				shift 2
 				;;
@@ -155,6 +176,14 @@ cmd_spawn() {
 		echo "pj-sandbox: spawn: --ports takes comma-separated port numbers (1-65535), got '$guest_ports'" >&2
 		return 1
 	fi
+	case "$egress_mode" in
+		deny | observe | open) ;;
+		*)
+			echo "pj-sandbox: spawn: --egress takes deny, observe or open, got '$egress_mode'" >&2
+			return 1
+			;;
+	esac
+	pj_sandbox_proxy_valid_host "$PJ_SANDBOX_PROXY_HOST" || return 1
 	agents="$(pj_sandbox_profiles_resolve "$PJ_SANDBOX_PROFILES_DIR" "$agents_csv")" || return 1
 	pj_sandbox_state_valid_task "$task" || return 1
 	pj_sandbox_git_valid_branch "$task" || return 1
@@ -173,6 +202,8 @@ cmd_spawn() {
 	if [ -n "$guest_ports" ]; then
 		mappings="$(pj_sandbox_allocate_ports "$guest_ports" "$ssh_port")" || return 1
 	fi
+	proxy_port="$(pj_sandbox_allocate_port "$ssh_port $(printf '%s\n' "$mappings" | cut -s -d: -f2)")" || return 1
+	proxy_pid=""
 
 	# The bundle goes in the task's state dir, which has no meta yet, so a
 	# failure from here until the record is written must remove it.
@@ -229,6 +260,16 @@ cmd_spawn() {
 	fi
 	rm -rf "$render_dir"
 
+	# Only now: the host's address on the host-only network exists once a
+	# VM on it is up.
+	if ! proxy_pid="$(pj_sandbox_proxy_start "$PJ_SANDBOX_STATE_DIR/$task" "$egress_mode" \
+		"$PJ_SANDBOX_PROXY_HOST" "$proxy_port" "$PJ_SANDBOX_CONFIG_DIR")"; then
+		proxy_pid=""
+		_pj_sandbox_spawn_abort
+		echo "pj-sandbox: spawn: the egress proxy for '$task' didn't start" >&2
+		return 1
+	fi
+
 	if ! limactl copy "$bundle" "$instance:$guest_bundle" ||
 		! pj_sandbox_git_guest_script |
 		limactl shell --workdir / "$instance" sh -s -- "$guest_bundle" "$PJ_SANDBOX_GUEST_WORKSPACE" "$task"; then
@@ -238,16 +279,24 @@ cmd_spawn() {
 	fi
 	_pj_sandbox_spawn_drop_bundle
 
-	lima_ssh_config="$(limactl ls --format='{{.SSHConfigFile}}' "$instance")" || return 1
-	pj_sandbox_ssh_write_entry "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$instance" \
-		"$(pj_sandbox_ssh_render_host_block "$instance" "$lima_ssh_config")" || return 1
-	pj_sandbox_ssh_ensure_include "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_SSH_CONFIG_FILE" || return 1
+	if ! lima_ssh_config="$(limactl ls --format='{{.SSHConfigFile}}' "$instance")" ||
+		! pj_sandbox_ssh_write_entry "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$instance" \
+			"$(pj_sandbox_ssh_render_host_block "$instance" "$lima_ssh_config")" ||
+		! pj_sandbox_ssh_ensure_include "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_SSH_CONFIG_FILE"; then
+		_pj_sandbox_spawn_stop_proxy
+		return 1
+	fi
 
-	if ! pj_sandbox_bootstrap_guest "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_DOTFILES_HOME" "$PJ_SANDBOX_CONFIG_DIR/ca/ca.pem"; then
+	if ! pj_sandbox_bootstrap_guest "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_DOTFILES_HOME" \
+		"$PJ_SANDBOX_CONFIG_DIR/ca/ca.pem" "http://$PJ_SANDBOX_PROXY_HOST:$proxy_port"; then
+		_pj_sandbox_spawn_stop_proxy
 		echo "pj-sandbox: spawn: bootstrapping dotfiles in $instance failed" >&2
 		return 1
 	fi
-	pj_sandbox_profiles_post_bootstrap "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE" || return 1
+	if ! pj_sandbox_profiles_post_bootstrap "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE"; then
+		_pj_sandbox_spawn_stop_proxy
+		return 1
+	fi
 
 	pj_sandbox_state_write "$task" \
 		"task=$task" \
@@ -258,7 +307,13 @@ cmd_spawn() {
 		"agents=$(printf '%s\n' "$agents" | paste -sd , -)" \
 		"ssh_port=$ssh_port" \
 		"ports=$(printf '%s\n' "$mappings" | paste -sd , -)" \
-		"created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 1
+		"created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+		"egress_mode=$egress_mode" \
+		"proxy_port=$proxy_port" \
+		"proxy_pid=$proxy_pid" || {
+		_pj_sandbox_spawn_stop_proxy
+		return 1
+	}
 
 	echo "pj-sandbox: spawned '$task' as $instance (ssh $instance)"
 	if [ -n "$mappings" ]; then

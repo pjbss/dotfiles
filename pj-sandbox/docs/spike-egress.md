@@ -169,3 +169,39 @@ Results (2026-10-12, Lima 2.2.0, macOS 26.6.2, qemu):
 Both failures are Lima's user-mode `eth0`, the open question above (rerun 12:07/12:12 with probe stderr shown): `macvlan off eth0 reached 1.1.1.1:443` and `via 192.168.5.2 dev eth0 got out`. Everything else held, so the candidate passes if `eth0` can be closed from the host.
 
 ## Findings
+
+Decided 2026-10-12: **vmnet-hostonly**, with the `eth0` gap below accepted
+for now.
+
+- **Mechanism.** Every pj-sandbox VM is `vmType: qemu` with one extra NIC on
+  Lima's socket_vmnet `host` network (`lima0`, 192.168.106.0/24), copied from
+  `pj-sandbox/lima/spike/vmnet-hostonly.yaml`. Lima's provisioning runs at
+  boot over `eth0` as usual. The guest bootstrap then deletes `eth0`'s default
+  route, through a systemd unit so it holds across reboots. After that,
+  `lima0` is the only route left, and it has no route off the Mac. Picked
+  over gateway-vm, which scored the same: it needs no second VM, and it leaves
+  the proxy on the host, where the tokens already are. user-v2 was only
+  baselined, and it allows everything without a host filter.
+- **Proxy.** One `mitmdump` per task on the host, started by `spawn` after
+  `limactl start`, because the host's 192.168.106.1 only exists once a vmnet
+  VM is up. It listens on 192.168.106.1 at a port taken from the pj-sandbox
+  port range, never on 0.0.0.0. Its PID and port go in the state record, and
+  `rm`/`gc` stop it.
+- **DNS.** The guest has no resolver of its own. Clients go through
+  `HTTP(S)_PROXY`, so the task's proxy resolves names on the host. The guest
+  bootstrap also blackholes Lima's SLIRP resolver (192.168.5.3), which sits on
+  `eth0`'s own subnet and would otherwise survive the route removal.
+- **ssh** still rides `eth0` (QEMU `hostfwd`) to 127.0.0.1 on the host, so
+  only the default route is removed from `eth0`, not the NIC itself.
+
+Known gaps, accepted by the user on 2026-10-12 and not closed by this
+mechanism:
+
+- **`eth0` is closed from inside the guest.** Root can put the default route
+  back (`flush-and-reroute`), unblackhole 192.168.5.3, or reach out from a
+  macvlan container on `eth0` (`docker-macvlan`). Both escape probes still
+  FAIL. When this is picked up again, start with the leads in "Status" above
+  (QEMU `restrict=on` through a `QEMU_SYSTEM_<arch>` wrapper, or `vmType: vz`).
+- **Guests share one host-only network.** One task's guest can reach another
+  guest's addresses and another task's proxy port on 192.168.106.1, and so use
+  that task's allowlist and tokens.

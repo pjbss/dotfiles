@@ -23,6 +23,12 @@ PJ_SANDBOX_SSH_CONFIG_FILE="${PJ_SANDBOX_SSH_CONFIG_FILE:-$HOME/.ssh/config}"
 PJ_SANDBOX_PORT_MIN="${PJ_SANDBOX_PORT_MIN:-61022}"
 PJ_SANDBOX_PORT_MAX="${PJ_SANDBOX_PORT_MAX:-61099}"
 
+# Where each task's egress proxy listens: the host's address on Lima's
+# socket_vmnet host-only network (the "host" network's gateway in
+# $LIMA_HOME/_config/networks.yaml), the guest's only route off its own disk.
+# Never a wildcard address (lib/proxy.sh refuses one).
+PJ_SANDBOX_PROXY_HOST="${PJ_SANDBOX_PROXY_HOST:-192.168.106.1}"
+
 PJ_SANDBOX_CONFIG_DIR="${PJ_SANDBOX_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/pj-sandbox}"
 
 # Per-task state lives in $PJ_SANDBOX_STATE_DIR/<task>/.

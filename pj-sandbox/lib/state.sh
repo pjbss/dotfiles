@@ -6,7 +6,7 @@
 # Meant to be sourced after namespace.sh, not executed.
 
 # Every key a record may hold, in the order a record is written.
-PJ_SANDBOX_STATE_KEYS="task instance repo branch base agents ssh_port ports created fetched egress_mode"
+PJ_SANDBOX_STATE_KEYS="task instance repo branch base agents ssh_port ports created fetched egress_mode proxy_port proxy_pid"
 
 # pj_sandbox_state_valid_task TASK
 #
