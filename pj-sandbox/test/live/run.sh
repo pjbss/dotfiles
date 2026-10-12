@@ -263,6 +263,9 @@ for dev in $(ls /sys/class/net); do
 	# Pinned to .250: docker would otherwise hand out the first free address,
 	# .2, which is the guest's own DHCP lease on lima0. With a duplicate IP the
 	# replies go to the guest, and the probe fails whatever the network allows.
+	# .250 is clear of Lima's eth0 addresses (.2, .3, .15), but on lima0 it's
+	# still inside vmnet's DHCP pool (dhcpEnd .254 in Lima's networks.yaml).
+	# It's only unlikely to be leased, since that takes ~249 leases first.
 	case "$subnet" in
 		*.0/24) range="${subnet%.0/24}.250/32" ;;
 		*)

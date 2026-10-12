@@ -150,7 +150,7 @@ STUB
 cat > "$gstub/ip" <<'STUB'
 #!/bin/sh
 case "$*" in
-	"-4 route show dev eth0 scope link proto kernel") echo "192.168.5.0/24 src 192.168.5.15" ;;
+	"-4 route show dev eth0 scope link proto kernel") echo "${G_SUBNET:-192.168.5.0/24} src 192.168.5.15" ;;
 	"-4 route show default") echo "default via 192.168.106.1 dev lima0" ;;
 	"-4 route show") echo "192.168.5.0/24 dev eth0 proto kernel scope link src 192.168.5.15" ;;
 	# Like the real ip, a route with no gateway or device is an error.
@@ -207,6 +207,13 @@ assert_eq 0 "$(run_guest container-egress G_RUN_RC=28)" "container-egress: a con
 : > "$fixture/docker-network-create"
 run_guest container-egress >/dev/null
 assert_contains "$(cat "$fixture/docker-network-create")" "--ip-range 192.168.5.250/32" "the macvlan container is pinned to .250, away from DHCP leases"
+
+# Pinning to .250 only makes sense on a /24; any other subnet is skipped.
+: > "$fixture/docker-network-create"
+rc="$(run_guest container-egress G_SUBNET=10.0.0.0/16)"
+assert_not_contains " 0 10 " " $rc " "container-egress: a NIC on a non-/24 subnet couldn't run (got $rc), rather than passing"
+assert_contains "$(cat "$fixture/guest.err")" "10.0.0.0/16" "container-egress names the non-/24 subnet it skipped"
+assert_eq "" "$(cat "$fixture/docker-network-create")" "no macvlan network is made on a non-/24 subnet"
 
 assert_eq 0 "$(run_guest egress-root)" "egress-root: a reroute that still can't connect is blocked"
 rc="$(run_guest egress-root G_CURL_RC=127)"
