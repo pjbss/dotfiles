@@ -8,3 +8,6 @@
 
 # issue tracking files
 issues/*
+
+# Python bytecode (pj-sandbox/proxy runs under python3)
+__pycache__/
