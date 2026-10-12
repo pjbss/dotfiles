@@ -41,8 +41,9 @@
 # The attacks run in the order above, except egress-root, which runs last
 # because it disturbs the guest's network. A summary follows, and the exit
 # status is 0 only if every line is a PASS. An attack whose setup fails (an
-# image that won't pull, a tool that isn't there) is a FAIL, not a PASS:
-# nothing was shown to be blocked.
+# image that won't pull, a tool that isn't there, a macvlan network or route
+# change it couldn't make) is a FAIL, not a PASS: that way out wasn't shown
+# to be blocked.
 #
 # Before attacking, the host checks it can reach the denied host itself. If
 # it can't, a PASS against it proves nothing, and a warning says so.
@@ -168,8 +169,15 @@ iptables -F; iptables -P OUTPUT ACCEPT; iptables -t nat -F
 ip6tables -F 2>/dev/null; ip6tables -P OUTPUT ACCEPT 2>/dev/null
 nft flush ruleset 2>/dev/null
 reached=0
+skipped=0
 while read -r gw dev; do
-	ip -4 route replace default via "$gw" dev "$dev" 2>/dev/null || continue
+	# The first line is empty when the guest has no gatewayed routes left.
+	[ -n "$gw" ] || continue
+	if ! ip -4 route replace default via "$gw" dev "$dev" 2>/dev/null; then
+		echo "  couldn't point the default route via $gw dev $dev, so that way out wasn't tried" >&2
+		skipped=1
+		continue
+	fi
 	if curl -sS -o /dev/null --noproxy '*' --max-time 10 \
 		--resolve "$denied_host:443:$denied_addr" "https://$denied_host/"; then
 		echo "  via $gw dev $dev reached $denied_host" >&2
@@ -186,6 +194,7 @@ printf '%s\n' "$saved" | while read -r route; do
 	[ -z "$route" ] || ip -4 route add $route
 done
 /usr/local/sbin/pjsb-egress-lockdown >/dev/null 2>&1 || echo "  couldn't re-run pjsb-egress-lockdown" >&2
+[ "$reached" -ne 0 ] || [ "$skipped" -eq 0 ] || exit 3
 exit "$reached"
 EOF
 }
@@ -205,6 +214,7 @@ hostonly_gw='$HOSTONLY_GATEWAY'
 EOF
 	cat <<'EOF'
 reached=0
+skipped=0
 probe() {
 	docker run --rm "$@" "$image" -sS -o /dev/null --max-time 10 \
 		--resolve "$denied_host:443:$denied_addr" "https://$denied_host/"
@@ -229,13 +239,18 @@ for dev in $(ls /sys/class/net); do
 		*) gw="" ;;
 	esac
 	docker network rm pjsb-live-mv >/dev/null 2>&1 || true
-	docker network create -d macvlan -o parent="$dev" --subnet "$subnet" ${gw:+--gateway "$gw"} pjsb-live-mv >/dev/null || continue
+	if ! docker network create -d macvlan -o parent="$dev" --subnet "$subnet" ${gw:+--gateway "$gw"} pjsb-live-mv >/dev/null; then
+		echo "  couldn't make a macvlan network off $dev, so no container tried it" >&2
+		skipped=1
+		continue
+	fi
 	if probe --network pjsb-live-mv; then
 		echo "  a macvlan container off $dev reached $denied_host" >&2
 		reached=10
 	fi
 	docker network rm pjsb-live-mv >/dev/null 2>&1 || true
 done
+[ "$reached" -ne 0 ] || [ "$skipped" -eq 0 ] || exit 3
 exit "$reached"
 EOF
 }
@@ -251,13 +266,18 @@ resolvers='$RESOLVER $SLIRP_RESOLVER'
 EOF
 	cat <<'EOF'
 command -v dig >/dev/null 2>&1 || { echo "  dig isn't installed" >&2; exit 2; }
+# answered DIG_ARGS...: true only if dig got a reply with an answer in it.
+# On a timeout dig exits non-zero but still prints ";; ..." to stdout.
+answered() {
+	out="$(dig "$@")" && printf '%s\n' "$out" | grep -qv '^;'
+}
 reached=0
 for r in $resolvers; do
-	if dig +time=3 +tries=1 +short "@$r" "$denied_host" | grep -q .; then
+	if answered +time=3 +tries=1 +short "@$r" "$denied_host"; then
 		echo "  UDP 53 to $r answered" >&2
 		reached=10
 	fi
-	if dig +tcp +time=3 +tries=1 +short "@$r" "$denied_host" | grep -q .; then
+	if answered +tcp +time=3 +tries=1 +short "@$r" "$denied_host"; then
 		echo "  TCP 53 to $r answered" >&2
 		reached=10
 	fi
@@ -459,7 +479,24 @@ attack_token_hunt() {
 
 attack_placeholder_leak() {
 	leak_script | guest >/dev/null 2>&1 || true
-	if "$CLI" logs "$TASK" --denied --json 2>/dev/null | python3 -c '
+	# Like verify, try for about two seconds, so a proxy that hasn't flushed
+	# yet isn't mistaken for one that never logged the leak.
+	tries=0
+	until leak_logged; do
+		if [ "$tries" -ge 10 ]; then
+			report FAIL placeholder-leak "no placeholder-leak line for $LEAK_HOST in the task's egress log"
+			return
+		fi
+		sleep 0.2
+		tries=$((tries + 1))
+	done
+	report PASS placeholder-leak "the proxy denied $GH_PLACEHOLDER to $LEAK_HOST and logged a placeholder-leak"
+}
+
+# leak_logged: true if the task's denied log has a placeholder-leak for
+# LEAK_HOST.
+leak_logged() {
+	"$CLI" logs "$TASK" --denied --json 2>/dev/null | python3 -c '
 import json, sys
 for line in sys.stdin:
     try:
@@ -469,11 +506,7 @@ for line in sys.stdin:
     if e.get("rule") == "placeholder-leak" and e.get("host") == sys.argv[1]:
         sys.exit(0)
 sys.exit(1)
-' "$LEAK_HOST"; then
-		report PASS placeholder-leak "the proxy denied $GH_PLACEHOLDER to $LEAK_HOST and logged a placeholder-leak"
-	else
-		report FAIL placeholder-leak "no placeholder-leak line for $LEAK_HOST in the task's egress log"
-	fi
+' "$LEAK_HOST"
 }
 
 echo "== Setup =="
