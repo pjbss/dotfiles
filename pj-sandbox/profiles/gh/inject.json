@@ -1,0 +1,4 @@
+[
+  {"host": "api.github.com", "header": "Authorization", "scheme": "bearer", "placeholder": "pjsb-placeholder-gh", "token_source": ["keychain:pj-sandbox/gh", "cmd:gh auth token"]},
+  {"host": "github.com", "header": "Authorization", "scheme": "basic", "placeholder": "pjsb-placeholder-gh", "token_source": ["keychain:pj-sandbox/gh", "cmd:gh auth token"]}
+]

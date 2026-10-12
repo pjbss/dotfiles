@@ -90,7 +90,7 @@ files="$(
 	{
 		find bin pj-sandbox/bin -type f || true
 		find sandbox/lib agents/lib pj-sandbox/lib test -type f -name '*.sh' 2>/dev/null || true
-		find agents/lib -type f -name '*.py' 2>/dev/null || true
+		find agents/lib pj-sandbox/proxy -type f -name '*.py' 2>/dev/null || true
 		find sandbox/test zsh/modules/test agents/test pj-sandbox/test -type f -name '*.sh' 2>/dev/null || true
 		find zsh -type f -name '*.zsh' || true
 		echo install.sh

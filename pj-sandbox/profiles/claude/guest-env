@@ -1,0 +1,6 @@
+# claude profile: what the guest sees in place of a real token. Placeholders
+# only; the host proxy swaps in the real one.
+CLAUDE_CODE_OAUTH_TOKEN=pjsb-placeholder-claude
+# Node ignores the system trust store, so it's pointed at the proxy CA the
+# bootstrap installs.
+NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/pjsb.crt

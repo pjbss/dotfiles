@@ -1,0 +1,59 @@
+# gateway-vm-gw.yaml
+#
+# Egress spike, candidate 3, the *gateway* half. It has two NICs: Lima's
+# built-in eth0 for its own way out, and lima0 on the socket_vmnet host-only
+# network it shares with the agent VM (gateway-vm.yaml). nftables drops every
+# forwarded packet, and everything arriving on lima0 except the proxy port.
+# spike_egress.sh starts mitmdump on :8080 after boot, so the proxy is the only
+# thing the agent can talk to.
+#
+# Booted only by pj-sandbox/test/live/spike_egress.sh, as a throwaway
+# pjsb-spike-* instance. See pj-sandbox/docs/spike-egress.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "1GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+
+vmType: qemu
+
+networks:
+- lima: host
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v nft >/dev/null 2>&1 || { apt-get update; apt-get install -y nftables; }
+    command -v mitmdump >/dev/null 2>&1 || { apt-get update; apt-get install -y mitmproxy; }
+    sysctl -w net.ipv4.ip_forward=0
+    sysctl -w net.ipv6.conf.all.forwarding=0
+    cat > /etc/nftables.conf <<'NFT'
+    flush ruleset
+    table inet pjsb_spike {
+      chain forward {
+        type filter hook forward priority 0; policy drop;
+      }
+      chain input {
+        type filter hook input priority 0; policy accept;
+        iifname "lima0" ct state established,related accept
+        iifname "lima0" tcp dport 8080 accept
+        iifname "lima0" drop
+      }
+    }
+    NFT
+    nft -f /etc/nftables.conf

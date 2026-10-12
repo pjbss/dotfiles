@@ -1,0 +1,28 @@
+# core-provision.yaml
+#
+# The provision step every pj-sandbox VM gets, whatever its agent profiles:
+# Docker, Node/npm (which the npm-installed profiles need) and git-lfs.
+# Ported from the provision: block of sandbox/lima-template.yaml, minus the
+# agent CLIs, which moved into pj-sandbox/profiles/<name>/provision.sh. spawn
+# renders it ahead of the profiles' steps. Raw provision list items, so it
+# must stay at column 0. Every install is guarded by `command -v`, so a
+# re-boot is a cheap no-op.
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    if ! command -v docker >/dev/null 2>&1; then
+      curl -fsSL https://get.docker.com | sh
+    fi
+    usermod -aG docker {{.User}}
+
+    if ! command -v node >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y nodejs npm
+    fi
+
+    if ! command -v git-lfs >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y git-lfs
+    fi
+    git lfs install --system

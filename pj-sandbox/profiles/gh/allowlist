@@ -1,0 +1,9 @@
+# gh profile: the hosts gh and git need. One host pattern per line (exact or
+# *.suffix), optionally followed by methods and a path prefix. Hand-curated;
+# observe-mode logs refine it.
+github.com
+api.github.com
+codeload.github.com
+uploads.github.com
+# Raw content, release assets and LFS objects.
+*.githubusercontent.com

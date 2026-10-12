@@ -18,7 +18,7 @@ CLI="$PJ_SANDBOX_DIR/bin/pj-sandbox"
 for flag in --help -h help; do
 	if out="$("$CLI" "$flag" 2>&1)"; then rc=0; else rc=$?; fi
 	assert_exit_code 0 "$rc" "pj-sandbox $flag exits 0"
-	for sub in spawn exec run attach list status logs fetch verify rm gc; do
+	for sub in spawn exec run attach list status logs allowlist fetch verify rm gc; do
 		assert_contains "$out" "  $sub" "pj-sandbox $flag lists '$sub'"
 	done
 done

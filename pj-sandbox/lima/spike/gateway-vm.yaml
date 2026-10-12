@@ -1,0 +1,45 @@
+# gateway-vm.yaml
+#
+# Egress spike, candidate 3, the *agent* half: a Qubes-style firewall VM. The
+# agent VM is on the socket_vmnet host-only network with the gateway VM
+# (gateway-vm-gw.yaml), and its default route points at the gateway, which
+# runs the proxy and forwards nothing. Lima's built-in eth0 is blackholed from
+# inside the guest after boot, the same as vmnet-hostonly, and the
+# flush-and-reroute probe measures whether root can undo it.
+#
+# Booted only by pj-sandbox/test/live/spike_egress.sh, as a throwaway
+# pjsb-spike-* instance. See pj-sandbox/docs/spike-egress.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "2GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+
+vmType: qemu
+
+networks:
+- lima: host
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v dig >/dev/null 2>&1 || { apt-get update; apt-get install -y bind9-dnsutils; }
+    command -v nc >/dev/null 2>&1 || { apt-get update; apt-get install -y netcat-openbsd; }
+    command -v nft >/dev/null 2>&1 || { apt-get update; apt-get install -y nftables; }
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    docker image inspect alpine >/dev/null 2>&1 || docker pull alpine

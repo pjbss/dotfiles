@@ -1,0 +1,5 @@
+# copilot profile: the hosts the Copilot CLI needs. One host pattern per line
+# (exact or *.suffix), optionally followed by methods and a path prefix.
+# Hand-curated; observe-mode logs refine it.
+api.github.com
+*.githubcopilot.com

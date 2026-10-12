@@ -1,0 +1,11 @@
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    if ! command -v python3.12 >/dev/null 2>&1; then
+      apt-get update
+      apt-get install -y software-properties-common
+      add-apt-repository -y ppa:deadsnakes/ppa
+      apt-get update
+      apt-get install -y python3.12 python3.12-venv python3.12-dev
+    fi

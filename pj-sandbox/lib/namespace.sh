@@ -16,6 +16,9 @@ PJ_SANDBOX_INSTANCE_PREFIX="${PJ_SANDBOX_INSTANCE_PREFIX:-pjsb-}"
 # The old tools discover sandboxes through ~/.ssh/pj-sandbox-config.
 PJ_SANDBOX_SSH_INCLUDE_FILE="${PJ_SANDBOX_SSH_INCLUDE_FILE:-$HOME/.ssh/pj-sandbox-next-config}"
 
+# The user's own ssh config, which gets one Include line for the file above.
+PJ_SANDBOX_SSH_CONFIG_FILE="${PJ_SANDBOX_SSH_CONFIG_FILE:-$HOME/.ssh/config}"
+
 # ssh/forward ports. The old range is 60022-60099.
 PJ_SANDBOX_PORT_MIN="${PJ_SANDBOX_PORT_MIN:-61022}"
 PJ_SANDBOX_PORT_MAX="${PJ_SANDBOX_PORT_MAX:-61099}"

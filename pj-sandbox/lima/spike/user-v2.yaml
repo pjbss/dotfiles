@@ -1,0 +1,44 @@
+# user-v2.yaml
+#
+# Egress spike, candidate 2: Lima's user-v2 network (gvisor-tap-vsock,
+# 192.168.104.0/24). Every guest connection leaves the Mac as an ordinary
+# socket of the host-side usernet process, so enforcement has to be an outside
+# filter on the host, never anything inside the guest. spike_egress.sh runs
+# PJ_SPIKE_HOST_FILTER (e.g. a pfctl anchor) after boot to install one, and
+# PJ_SPIKE_HOST_UNFILTER at teardown. The host proxy is reached at
+# host.lima.internal.
+#
+# Booted only by pj-sandbox/test/live/spike_egress.sh, as a throwaway
+# pjsb-spike-* instance. See pj-sandbox/docs/spike-egress.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "2GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+
+networks:
+- lima: user-v2
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v dig >/dev/null 2>&1 || { apt-get update; apt-get install -y bind9-dnsutils; }
+    command -v nc >/dev/null 2>&1 || { apt-get update; apt-get install -y netcat-openbsd; }
+    command -v nft >/dev/null 2>&1 || { apt-get update; apt-get install -y nftables; }
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    docker image inspect alpine >/dev/null 2>&1 || docker pull alpine

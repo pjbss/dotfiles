@@ -1,0 +1,3 @@
+[
+  {"host": "api.anthropic.com", "header": "Authorization", "scheme": "bearer", "placeholder": "pjsb-placeholder-claude", "token_source": ["keychain:pj-sandbox/claude", "file:~/.claude/sandbox-oauth-token"]}
+]

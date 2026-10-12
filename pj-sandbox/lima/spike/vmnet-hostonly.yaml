@@ -1,0 +1,48 @@
+# vmnet-hostonly.yaml
+#
+# Egress spike, candidate 1 (issues/prd-pj-sandbox.md, "Egress enforcement
+# point"): the agent VM sits on a socket_vmnet *host-only* network, which has
+# no route off the Mac, and reaches the host proxy at that network's gateway
+# (192.168.106.1, from $LIMA_HOME/_config/networks.yaml). Lima's built-in
+# user-mode NIC (eth0, SLIRP) can't be dropped from the config, so
+# spike_egress.sh blackholes it from inside the guest after boot. Whether root
+# can simply undo that is what the flush-and-reroute probe measures.
+#
+# Booted only by pj-sandbox/test/live/spike_egress.sh, as a throwaway
+# pjsb-spike-* instance. See pj-sandbox/docs/spike-egress.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "2GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+
+vmType: qemu
+
+networks:
+- lima: host
+
+# Runs while eth0 still has a route, so the probe tools and the alpine image
+# for the macvlan probe are in place before the network is locked down.
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v dig >/dev/null 2>&1 || { apt-get update; apt-get install -y bind9-dnsutils; }
+    command -v nc >/dev/null 2>&1 || { apt-get update; apt-get install -y netcat-openbsd; }
+    command -v nft >/dev/null 2>&1 || { apt-get update; apt-get install -y nftables; }
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    docker image inspect alpine >/dev/null 2>&1 || docker pull alpine

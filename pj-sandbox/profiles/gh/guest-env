@@ -1,0 +1,7 @@
+# gh profile: what the guest sees in place of a real token. Placeholders only;
+# the host proxy swaps in the real one.
+GH_TOKEN=pjsb-placeholder-gh
+# gh and git are pointed at the system bundle, which update-ca-certificates
+# rebuilds with the proxy CA the bootstrap installs.
+SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt

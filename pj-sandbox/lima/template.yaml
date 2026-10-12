@@ -1,0 +1,28 @@
+# template.yaml
+#
+# The hardened base Lima config for every pj-sandbox VM. Rendered per task by
+# pj_sandbox_render_lima_config (lib/render.sh), which fills in the ssh port
+# and replaces each placeholder line below with the task's port forwards or
+# --base provisioning (pj-sandbox/templates/), or with nothing.
+#
+# Unlike sandbox/lima-template.yaml, nothing from the host is shared into the
+# guest: the explicit empty list below overrides Lima's default of sharing the
+# host home directory. The repo, dotfiles and credentials reach the guest
+# other ways (a git bundle, a copied archive, a host-side proxy), never as a
+# host directory the guest could write through.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "6GiB"
+
+ssh:
+  localPort: __PJ_SANDBOX_SSH_PORT__
+
+mounts: []
+
+__PJ_SANDBOX_PORT_FORWARDS__
+
+__PJ_SANDBOX_BASE_PROVISION__

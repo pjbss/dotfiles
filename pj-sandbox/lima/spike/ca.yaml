@@ -1,0 +1,52 @@
+# ca.yaml
+#
+# CA and pinning spike: an ordinary guest with the three agents installed. The
+# network is Lima's default, because this spike is about whether each agent
+# trusts the proxy CA and accepts a rewritten placeholder token, not about
+# egress enforcement (that's spike_egress.sh). The host's mitmdump is reached
+# at host.lima.internal.
+#
+# Booted only by pj-sandbox/test/live/spike_ca.sh, as a throwaway
+# pjsb-spike-ca instance. See pj-sandbox/docs/spike-ca.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+memory: "4GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+
+# Node 22 from NodeSource, because the Copilot CLI won't run on Ubuntu's own
+# nodejs. The VM is thrown away after one run, so the agents' auto-updaters
+# being unable to write to the root-owned npm prefix doesn't matter.
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v update-ca-certificates >/dev/null 2>&1 || { apt-get update; apt-get install -y ca-certificates; }
+    command -v git >/dev/null 2>&1 || { apt-get update; apt-get install -y git; }
+    if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'process.versions.node.split(".")[0]')" -lt 22 ]; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y nodejs
+    fi
+    command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code
+    command -v copilot >/dev/null 2>&1 || npm install -g @github/copilot
+    if ! command -v gh >/dev/null 2>&1; then
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+      chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+      apt-get update
+      apt-get install -y gh
+    fi

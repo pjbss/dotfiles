@@ -1,0 +1,5 @@
+[
+  {"host": "api.github.com", "header": "Authorization", "scheme": "bearer", "placeholder": "pjsb-placeholder-copilot", "token_source": ["keychain:pj-sandbox/copilot", "cmd:gh auth token"]},
+  {"host": "api.githubcopilot.com", "header": "Authorization", "scheme": "bearer", "placeholder": "pjsb-placeholder-copilot", "token_source": ["keychain:pj-sandbox/copilot", "cmd:gh auth token"]},
+  {"host": "api.individual.githubcopilot.com", "header": "Authorization", "scheme": "bearer", "placeholder": "pjsb-placeholder-copilot", "token_source": ["keychain:pj-sandbox/copilot", "cmd:gh auth token"]}
+]

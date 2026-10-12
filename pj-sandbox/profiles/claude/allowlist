@@ -1,0 +1,8 @@
+# claude profile: the hosts Claude Code needs. One host pattern per line
+# (exact or *.suffix), optionally followed by methods and a path prefix.
+# Hand-curated; observe-mode logs refine it.
+api.anthropic.com
+console.anthropic.com
+statsig.anthropic.com
+claude.ai
+platform.claude.com

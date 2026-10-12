@@ -15,7 +15,8 @@
 #   attach   Open an interactive shell in a sandbox
 #   list     List sandboxes
 #   status   Show one sandbox's state
-#   logs     Show a sandbox's logs
+#   logs     Show a sandbox's egress log
+#   allowlist  Suggest allowlist entries from a sandbox's egress log
 #   fetch    Fetch a sandbox's branches into refs/sandbox/<task>/*
 #   verify   Check a sandbox's security properties
 #   rm       Tear down a sandbox
@@ -33,6 +34,8 @@ while [ -h "$SOURCE" ]; do
 	esac
 done
 PJ_SANDBOX_HOME="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+# For lib/namespace.sh, which can't find its own path.
+PJ_SANDBOX_DOTFILES_HOME="${PJ_SANDBOX_DOTFILES_HOME:-$(dirname "$PJ_SANDBOX_HOME")}"
 
 usage() {
 	sed -n '2,/^$/p' "$SOURCE" | sed 's/^# \{0,1\}//'
@@ -51,7 +54,7 @@ case "$sub" in
 		usage
 		exit 0
 		;;
-	spawn | exec | run | attach | list | status | logs | fetch | verify | rm | gc) ;;
+	spawn | exec | run | attach | list | status | logs | allowlist | fetch | verify | rm | gc) ;;
 	*)
 		echo "pj-sandbox: unknown subcommand '$sub' (see 'pj-sandbox --help')" >&2
 		exit 1
