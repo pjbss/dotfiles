@@ -160,16 +160,22 @@ case "$*" in
 	*) exit 0 ;;
 esac
 STUB
-cat > "$gstub/docker" <<'STUB'
+# `docker run` exits G_RUN_RC: 7 by default, curl's "couldn't connect".
+# Docker's own 125 means the container never started.
+cat > "$gstub/docker" <<STUB
 #!/bin/sh
-case "$1 $2" in
-	"network create") [ "${G_MACVLAN:-ok}" = ok ] ;;
-	"run --rm") exit 7 ;;
+case "\$1 \$2" in
+	"network create") echo "\$*" >> "$fixture/docker-network-create"; [ "\${G_MACVLAN:-ok}" = ok ] ;;
+	"run --rm") exit "\${G_RUN_RC:-7}" ;;
 	*) exit 0 ;;
 esac
 STUB
-for t in curl iptables ip6tables nft; do
-	printf '#!/bin/sh\nexit %s\n' "$([ "$t" = curl ] && echo 7 || echo 0)" > "$gstub/$t"
+cat > "$gstub/curl" <<'STUB'
+#!/bin/sh
+exit "${G_CURL_RC:-7}"
+STUB
+for t in iptables ip6tables nft; do
+	printf '#!/bin/sh\nexit 0\n' > "$gstub/$t"
 done
 chmod +x "$gstub"/*
 
@@ -192,7 +198,20 @@ rc="$(run_guest container-egress G_MACVLAN=fail)"
 assert_not_contains " 0 10 " " $rc " "container-egress: with no macvlan network created, it couldn't run (got $rc), rather than passing on the bridge probe alone"
 assert_contains "$(cat "$fixture/guest.err")" "eth0" "container-egress names the NIC whose macvlan network couldn't be made"
 
+rc="$(run_guest container-egress G_RUN_RC=125)"
+assert_not_contains " 0 10 " " $rc " "container-egress: a container docker couldn't start (exit 125) couldn't run (got $rc), rather than passing"
+assert_eq 0 "$(run_guest container-egress G_RUN_RC=28)" "container-egress: a container whose curl timed out is blocked"
+
+# The macvlan container mustn't take the first free address, which is the
+# guest's own DHCP lease on lima0.
+: > "$fixture/docker-network-create"
+run_guest container-egress >/dev/null
+assert_contains "$(cat "$fixture/docker-network-create")" "--ip-range 192.168.5.250/32" "the macvlan container is pinned to .250, away from DHCP leases"
+
 assert_eq 0 "$(run_guest egress-root)" "egress-root: a reroute that still can't connect is blocked"
+rc="$(run_guest egress-root G_CURL_RC=127)"
+assert_not_contains " 0 10 " " $rc " "egress-root: a curl that couldn't run (exit 127) couldn't run (got $rc), rather than passing"
+assert_eq 10 "$(run_guest egress-root G_CURL_RC=0)" "egress-root: a curl that connects is a breach"
 rc="$(run_guest egress-root G_ROUTE=fail)"
 assert_not_contains " 0 10 " " $rc " "egress-root: with no route change made, it couldn't run (got $rc), rather than passing"
 

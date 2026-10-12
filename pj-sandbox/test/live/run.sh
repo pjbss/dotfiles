@@ -151,6 +151,30 @@ test -x .git/hooks/post-checkout
 EOF
 }
 
+# outcome_script: the outcome helper both curl-probing scripts share. A probe
+# only shows a block if curl itself said it couldn't connect (7) or timed out
+# (28). Any other failure, such as docker's own 125-127 for a container that
+# never started, or curl failing after it connected, shows nothing, and
+# counts as skipped rather than blocked.
+outcome_script() {
+	cat <<'EOF'
+# outcome RC WHAT: records what one probe's exit status shows.
+outcome() {
+	case "$1" in
+		0)
+			echo "  $2 reached $denied_host" >&2
+			reached=10
+			;;
+		7 | 28) ;;
+		*)
+			echo "  $2 didn't get as far as connecting (exit $1), so it showed nothing" >&2
+			skipped=1
+			;;
+	esac
+}
+EOF
+}
+
 # egress_root_script DENIED_ADDR
 #
 # Runs as root. Plays the attacker, then puts the lockdown back so the rest
@@ -163,6 +187,7 @@ denied_addr='$1'
 slirp_gw='$SLIRP_GATEWAY'
 hostonly_gw='$HOSTONLY_GATEWAY'
 EOF
+	outcome_script
 	cat <<'EOF'
 saved="$(ip -4 route show default)"
 iptables -F; iptables -P OUTPUT ACCEPT; iptables -t nat -F
@@ -178,11 +203,9 @@ while read -r gw dev; do
 		skipped=1
 		continue
 	fi
-	if curl -sS -o /dev/null --noproxy '*' --max-time 10 \
-		--resolve "$denied_host:443:$denied_addr" "https://$denied_host/"; then
-		echo "  via $gw dev $dev reached $denied_host" >&2
-		reached=10
-	fi
+	curl -sS -o /dev/null --noproxy '*' --max-time 10 \
+		--resolve "$denied_host:443:$denied_addr" "https://$denied_host/"
+	outcome "$?" "curl via $gw dev $dev"
 done <<ROUTES
 $(ip -4 route show | awk '/ via / { for (i = 1; i < NF; i++) { if ($i == "via") g = $(i + 1); if ($i == "dev") d = $(i + 1) } print g, d }')
 $slirp_gw eth0
@@ -212,6 +235,7 @@ image='$IMAGE'
 slirp_gw='$SLIRP_GATEWAY'
 hostonly_gw='$HOSTONLY_GATEWAY'
 EOF
+	outcome_script
 	cat <<'EOF'
 reached=0
 skipped=0
@@ -224,10 +248,8 @@ if ! docker pull -q "$image" >/dev/null; then
 	exit 2
 fi
 # A container on the default bridge.
-if probe; then
-	echo "  a default-bridge container reached $denied_host" >&2
-	reached=10
-fi
+probe
+outcome "$?" "a default-bridge container"
 # A container on a macvlan network off each guest NIC.
 for dev in $(ls /sys/class/net); do
 	case "$dev" in lo | docker* | veth* | br-*) continue ;; esac
@@ -238,16 +260,25 @@ for dev in $(ls /sys/class/net); do
 		lima0) gw="$hostonly_gw" ;;
 		*) gw="" ;;
 	esac
+	# Pinned to .250: docker would otherwise hand out the first free address,
+	# .2, which is the guest's own DHCP lease on lima0. With a duplicate IP the
+	# replies go to the guest, and the probe fails whatever the network allows.
+	case "$subnet" in
+		*.0/24) range="${subnet%.0/24}.250/32" ;;
+		*)
+			echo "  $dev's subnet $subnet isn't a /24, so there's no safe address to pin a container to" >&2
+			skipped=1
+			continue
+			;;
+	esac
 	docker network rm pjsb-live-mv >/dev/null 2>&1 || true
-	if ! docker network create -d macvlan -o parent="$dev" --subnet "$subnet" ${gw:+--gateway "$gw"} pjsb-live-mv >/dev/null; then
+	if ! docker network create -d macvlan -o parent="$dev" --subnet "$subnet" --ip-range "$range" ${gw:+--gateway "$gw"} pjsb-live-mv >/dev/null; then
 		echo "  couldn't make a macvlan network off $dev, so no container tried it" >&2
 		skipped=1
 		continue
 	fi
-	if probe --network pjsb-live-mv; then
-		echo "  a macvlan container off $dev reached $denied_host" >&2
-		reached=10
-	fi
+	probe --network pjsb-live-mv
+	outcome "$?" "a macvlan container off $dev"
 	docker network rm pjsb-live-mv >/dev/null 2>&1 || true
 done
 [ "$reached" -ne 0 ] || [ "$skipped" -eq 0 ] || exit 3
@@ -266,8 +297,10 @@ resolvers='$RESOLVER $SLIRP_RESOLVER'
 EOF
 	cat <<'EOF'
 command -v dig >/dev/null 2>&1 || { echo "  dig isn't installed" >&2; exit 2; }
-# answered DIG_ARGS...: true only if dig got a reply with an answer in it.
-# On a timeout dig exits non-zero but still prints ";; ..." to stdout.
+# answered DIG_ARGS...: true if dig got any reply at all, even NXDOMAIN or
+# REFUSED (whose +short output is empty), since any reply means a tunnel
+# could work. On a timeout dig exits non-zero but still prints ";; ..." to
+# stdout, so its output alone can't be trusted.
 answered() {
 	out="$(dig "$@")" && printf '%s\n' "$out" | grep -qv '^;'
 }
