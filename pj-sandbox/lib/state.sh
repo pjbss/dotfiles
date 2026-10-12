@@ -6,7 +6,7 @@
 # Meant to be sourced after namespace.sh, not executed.
 
 # Every key a record may hold, in the order a record is written.
-PJ_SANDBOX_STATE_KEYS="task instance repo branch base agents ssh_port ports created fetched egress_mode proxy_port proxy_pid"
+PJ_SANDBOX_STATE_KEYS="task instance repo branch base agents creds ssh_port ports created fetched egress_mode proxy_port proxy_pid"
 
 # pj_sandbox_state_valid_task TASK
 #
@@ -145,8 +145,9 @@ pj_sandbox_state_tasks() {
 # pj_sandbox_state_json TASK STATUS
 #
 # Prints TASK's record as one JSON object of string fields, plus "status".
-# Built with awk so no JSON tool is needed: backslash, quote and every other
-# control character are escaped.
+# The one exception is `creds` (NAME:STATE,...), which becomes an object of
+# profile name to credential state. Built with awk so no JSON tool is needed:
+# backslash, quote and every other control character are escaped.
 pj_sandbox_state_json() {
 	pj_sandbox_state_exists "$1" || return 1
 	{
@@ -171,7 +172,19 @@ pj_sandbox_state_json() {
 		{
 			eq = index($0, "=")
 			if (eq == 0) next
-			printf "%s\"%s\":\"%s\"", (n++ ? "," : "{"), esc(substr($0, 1, eq - 1)), esc(substr($0, eq + 1))
+			key = substr($0, 1, eq - 1); val = substr($0, eq + 1)
+			if (key == "creds") {
+				obj = ""
+				m = split(val, pairs, ",")
+				for (i = 1; i <= m; i++) {
+					c = index(pairs[i], ":")
+					if (c == 0) continue
+					obj = obj (obj == "" ? "" : ",") "\"" esc(substr(pairs[i], 1, c - 1)) "\":\"" esc(substr(pairs[i], c + 1)) "\""
+				}
+				printf "%s\"creds\":{%s}", (n++ ? "," : "{"), obj
+				next
+			}
+			printf "%s\"%s\":\"%s\"", (n++ ? "," : "{"), esc(key), esc(val)
 		}
 		END { print (n ? "}" : "{}") }
 	'

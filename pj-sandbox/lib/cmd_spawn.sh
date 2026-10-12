@@ -1,6 +1,6 @@
 # cmd_spawn.sh
 #
-# pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open]
+# pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open] [--no-creds]
 # pj-sandbox spawn --base list | --help
 #
 # Run inside a git repo. Makes or reuses the host branch TASK (a new one
@@ -27,6 +27,13 @@
 # only route, and the bootstrap points the guest at it and closes the rest
 # (pj-sandbox/docs/spike-egress.md, "Findings"). The proxy's PID, port and
 # mode go in the state record, and a failure after it starts stops it.
+# Credentials: only the brokered profiles' inject rules go to the proxy, which
+# resolves their real tokens (lib/tokens.sh); the guest's login file gets each
+# profile's guest-env, with placeholders in place of those tokens. An
+# unbrokered profile's real token goes into the guest instead, with a warning.
+# --no-creds resolves no token, sends no placeholder and gives the proxy no
+# inject rules, for any profile. Each profile's state (lib/profiles.sh,
+# pj_sandbox_profile_creds) goes in the record's `creds` field.
 
 . "$PJ_SANDBOX_HOME/lib/namespace.sh"
 . "$PJ_SANDBOX_HOME/lib/state.sh"
@@ -51,7 +58,7 @@ PJ_SANDBOX_BUILTIN_TEMPLATES_DIR="$PJ_SANDBOX_HOME/templates"
 PJ_SANDBOX_PROFILES_DIR="$PJ_SANDBOX_HOME/profiles"
 
 _pj_sandbox_spawn_usage() {
-	echo "Usage: pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open]" >&2
+	echo "Usage: pj-sandbox spawn <task> --base <name> [--agent <name>[,<name>...]] [--ports <guest>[,<guest>...]] [--from <ref>] [--egress deny|observe|open] [--no-creds]" >&2
 }
 
 _pj_sandbox_spawn_names_block() {
@@ -116,6 +123,7 @@ cmd_spawn() {
 	guest_ports=""
 	from=""
 	egress_mode=deny
+	no_creds=no
 	agents_csv="$(pj_sandbox_profile_names "$PJ_SANDBOX_PROFILES_DIR" | paste -sd , -)"
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
@@ -132,6 +140,10 @@ cmd_spawn() {
 					--egress) egress_mode="$2" ;;
 				esac
 				shift 2
+				;;
+			--no-creds)
+				no_creds=yes
+				shift
 				;;
 			--help | -h)
 				_pj_sandbox_spawn_help
@@ -185,6 +197,13 @@ cmd_spawn() {
 	esac
 	pj_sandbox_proxy_valid_host "$PJ_SANDBOX_PROXY_HOST" || return 1
 	agents="$(pj_sandbox_profiles_resolve "$PJ_SANDBOX_PROFILES_DIR" "$agents_csv")" || return 1
+	brokered=""
+	for name in $agents; do
+		case "$(pj_sandbox_profile_creds "$PJ_SANDBOX_PROFILES_DIR" "$name" "$no_creds")" in
+			brokered) brokered="$brokered $name" ;;
+			unbrokered) echo "pj-sandbox: spawn: warning: agent profile '$name' is unbrokered: its real token is copied into the guest" >&2 ;;
+		esac
+	done
 	pj_sandbox_state_valid_task "$task" || return 1
 	pj_sandbox_git_valid_branch "$task" || return 1
 
@@ -225,7 +244,7 @@ cmd_spawn() {
 		_pj_sandbox_spawn_abort
 		return 1
 	}
-	if ! pj_sandbox_profiles_write_policy "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$PJ_SANDBOX_STATE_DIR/$task/policy" \
+	if ! pj_sandbox_profiles_write_policy "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$brokered" "$PJ_SANDBOX_STATE_DIR/$task/policy" \
 		${template_allowlist:+"$template_allowlist"} "$repo_allowlist"; then
 		_pj_sandbox_spawn_abort
 		return 1
@@ -287,12 +306,17 @@ cmd_spawn() {
 		return 1
 	fi
 
-	if ! pj_sandbox_bootstrap_guest "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_DOTFILES_HOME" \
-		"$PJ_SANDBOX_CONFIG_DIR/ca/ca.pem" "http://$PJ_SANDBOX_PROXY_HOST:$proxy_port"; then
+	# Can hold an unbrokered profile's real token, so it's only ever in this
+	# variable and the bootstrap's stdin.
+	if ! guest_env="$(pj_sandbox_profiles_guest_env "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$no_creds")" ||
+		! pj_sandbox_bootstrap_guest "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE" "$PJ_SANDBOX_DOTFILES_HOME" \
+			"$PJ_SANDBOX_CONFIG_DIR/ca/ca.pem" "http://$PJ_SANDBOX_PROXY_HOST:$proxy_port" "$guest_env"; then
+		guest_env=
 		_pj_sandbox_spawn_stop_proxy
 		echo "pj-sandbox: spawn: bootstrapping dotfiles in $instance failed" >&2
 		return 1
 	fi
+	guest_env=""
 	if ! pj_sandbox_profiles_post_bootstrap "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$instance" "$PJ_SANDBOX_SSH_INCLUDE_FILE"; then
 		_pj_sandbox_spawn_stop_proxy
 		return 1
@@ -305,6 +329,7 @@ cmd_spawn() {
 		"branch=$task" \
 		"base=$base" \
 		"agents=$(printf '%s\n' "$agents" | paste -sd , -)" \
+		"creds=$(pj_sandbox_profiles_creds "$PJ_SANDBOX_PROFILES_DIR" "$agents" "$no_creds")" \
 		"ssh_port=$ssh_port" \
 		"ports=$(printf '%s\n' "$mappings" | paste -sd , -)" \
 		"created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \

@@ -160,7 +160,7 @@ assert_eq "$entries" "$(sed -n '3,$p' "$target" | sed 's/[[:space:]]*#.*$//' | g
 # The next spawn's merge step: a profile plus the written file.
 mkdir -p "$fixture/profiles/p1"
 printf 'github.com\n' > "$fixture/profiles/p1/allowlist"
-sh -c 'PJ_SANDBOX_DOTFILES_HOME=/unused; . "$1/lib/profiles.sh"; pj_sandbox_profiles_write_policy "$2" p1 "$3" "$4" "$5"' \
+sh -c 'PJ_SANDBOX_DOTFILES_HOME=/unused; . "$1/lib/profiles.sh"; pj_sandbox_profiles_write_policy "$2" p1 p1 "$3" "$4" "$5"' \
 	sh "$PJ_SANDBOX_DIR" "$fixture/profiles" "$fixture/merged" "$target" "$fixture/no-such-allowlist"
 assert_eq "$(printf 'github.com\nexample.org\nfiles.pythonhosted.org\npypi.org\nregistry.npmjs.org')" \
 	"$(cat "$fixture/merged/allowlist")" "the merge step folds a --write file into policy/allowlist after the profiles' entries"

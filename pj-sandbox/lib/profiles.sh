@@ -12,6 +12,9 @@
 #   guest-env          KEY=value lines the guest gets: token placeholders and
 #                      the CA paths its tools need to trust the proxy
 #   post-bootstrap.sh  optional; run as the guest user after the bootstrap
+#   unbrokered         optional, empty; marks an agent the proxy can't broker
+#                      for (pj-sandbox/docs/spike-ca.md), so its real token is
+#                      put in the guest instead of a placeholder
 #
 # The core only reads these files. It never names an agent, so adding or
 # dropping one is a new directory, not a code change. Meant to be sourced,
@@ -108,16 +111,88 @@ _pj_sandbox_json_array_body() {
 	' "$1"
 }
 
-# pj_sandbox_profiles_write_policy PROFILES_DIR NAMES POLICY_DIR [ALLOWLIST...]
+# pj_sandbox_profile_creds PROFILES_DIR NAME NO_CREDS
+#
+# Prints profile NAME's credential state: `none` when NO_CREDS is yes or its
+# inject.json has no rules, `unbrokered` when it has an `unbrokered` file, and
+# `brokered` otherwise.
+pj_sandbox_profile_creds() {
+	if [ "$3" = yes ] || [ ! -f "$1/$2/inject.json" ] ||
+		[ -z "$(_pj_sandbox_json_array_body "$1/$2/inject.json" 2>/dev/null)" ]; then
+		echo none
+	elif [ -e "$1/$2/unbrokered" ]; then
+		echo unbrokered
+	else
+		echo brokered
+	fi
+}
+
+# pj_sandbox_profiles_creds PROFILES_DIR NAMES NO_CREDS
+#
+# Prints NAME:STATE for each of NAMES (pj_sandbox_profile_creds), comma
+# separated, for the state record's `creds` field.
+pj_sandbox_profiles_creds() {
+	for name in $2; do
+		printf '%s:%s\n' "$name" "$(pj_sandbox_profile_creds "$1" "$name" "$3")"
+	done | paste -sd , -
+}
+
+# pj_sandbox_profiles_guest_env PROFILES_DIR NAMES NO_CREDS
+#
+# Prints the KEY=value lines the guest gets from the selected profiles'
+# guest-env files, in NAMES order, comments, blank lines and repeats dropped.
+# A value that's a placeholder depends on its profile's credential state
+# (pj_sandbox_profile_creds): a brokered profile's is kept, a profile with
+# none has it dropped, and an unbrokered profile's is replaced by its real
+# token, resolved from that profile's own inject.json sources. The output can
+# then hold a real token, so it's meant for a variable, never a file.
+# A subshell, so no token is left in a caller's variables.
+pj_sandbox_profiles_guest_env() (
+	for name in $2; do
+		[ -f "$1/$name/guest-env" ] || continue
+		creds="$(pj_sandbox_profile_creds "$1" "$name" "$3")"
+		sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//' "$1/$name/guest-env" | grep -v '^$' |
+			while IFS= read -r line; do
+				case "${line#*=}" in
+					pjsb-placeholder-*) ;;
+					*)
+						printf '%s\n' "$line"
+						continue
+						;;
+				esac
+				case "$creds" in
+					brokered) printf '%s\n' "$line" ;;
+					unbrokered)
+						placeholder="${line#*=}"
+						env_name="PJSB_TOKEN_$(printf '%s' "$placeholder" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+						sources="$(python3 "$PJ_SANDBOX_HOME/proxy/inject.py" sources "$1/$name" </dev/null |
+							awk -F '\t' -v n="$env_name" '$1 == n { print $2 }')" || exit 1
+						IFS='
+'
+						set -f
+						# shellcheck disable=SC2086 # split on newlines only, one source per line
+						token="$(pj_sandbox_token_resolve $sources </dev/null)"
+						set +f
+						unset IFS
+						printf '%s=%s\n' "${line%%=*}" "$token"
+						;;
+				esac
+			done
+	done | awk '!seen[$0]++'
+)
+
+# pj_sandbox_profiles_write_policy PROFILES_DIR NAMES INJECT_NAMES POLICY_DIR [ALLOWLIST...]
 #
 # Writes the selected profiles' merged policy for the proxy into POLICY_DIR:
-# `allowlist` holds every entry in NAMES order, then each extra ALLOWLIST
-# file's (a template's or repo's; one that doesn't exist is skipped),
-# comments, blank lines and repeats dropped; `inject.json` holds every rule
-# in NAMES order, as one JSON array.
+# `allowlist` holds every entry of NAMES' profiles in order, then each extra
+# ALLOWLIST file's (a template's or repo's; one that doesn't exist is
+# skipped), comments, blank lines and repeats dropped; `inject.json` holds
+# every rule of INJECT_NAMES' profiles in order, as one JSON array. Spawn
+# passes only the brokered profiles as INJECT_NAMES, so the proxy never holds
+# a token the guest has, or one --no-creds withheld.
 pj_sandbox_profiles_write_policy() {
-	profiles_dir="$1" names="$2" policy_dir="$3"
-	shift 3
+	profiles_dir="$1" names="$2" inject_names="$3" policy_dir="$4"
+	shift 4
 	mkdir -p "$policy_dir" || return 1
 
 	# Trailing comments go too, so `host  # 3 requests` from `allowlist
@@ -132,7 +207,7 @@ pj_sandbox_profiles_write_policy() {
 	} | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//' | grep -v '^$' | awk '!seen[$0]++' > "$policy_dir/allowlist"
 
 	bodies=""
-	for name in $names; do
+	for name in $inject_names; do
 		[ -f "$profiles_dir/$name/inject.json" ] || continue
 		if ! body="$(_pj_sandbox_json_array_body "$profiles_dir/$name/inject.json")"; then
 			echo "pj-sandbox: agent profile '$name' has an inject.json that isn't a JSON array" >&2

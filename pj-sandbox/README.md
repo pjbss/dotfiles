@@ -72,8 +72,8 @@ These rules keep the old and new tooling from interfering while both exist:
 ## State
 
 Each task's record is `<state dir>/<task>/meta`: `key=value` lines (task,
-instance, repo, branch, base, agents, ssh_port, ports, created, fetched,
-egress_mode, proxy_port, proxy_pid)
+instance, repo, branch, base, agents, creds, ssh_port, ports, created,
+fetched, egress_mode, proxy_port, proxy_pid)
 written by `lib/state.sh` through a temp file and `mv`, so a reader never sees
 a half-written record. This file is the only thing that says a task exists.
 Neither ssh include file is ever read to find tasks.
@@ -82,11 +82,13 @@ Neither ssh include file is ever read to find tasks.
 `pj-sandbox status <task> [--json]` shows one. Both merge in live status from
 `limactl list --json`, counting only `pjsb-` instances. A recorded VM that Lima
 doesn't report shows as `missing`. If `limactl` itself fails, the status shows
-as `unknown`. JSON fields are all strings.
+as `unknown`. JSON fields are all strings, except `creds`, which is an object
+of profile name to credential state (`{"gh":"brokered",...}`; see
+"Credential injection").
 
 ## Spawning
 
-`pj-sandbox spawn <task> --base none [--ports 8000,5432] [--egress deny|observe|open]` boots
+`pj-sandbox spawn <task> --base none [--ports 8000,5432] [--egress deny|observe|open] [--no-creds]` boots
 `pjsb-<slug>` from `lima/template.yaml` with no host mounts. It writes a
 `Host pjsb-<slug>` entry to the include file (never to the old
 `~/.ssh/pj-sandbox-config`), makes sure `~/.ssh/config` includes that file,
@@ -146,20 +148,25 @@ The core never names an agent. Each one is a directory under `profiles/`
   `{host, header, scheme, placeholder, token_source}` rules, where
   `token_source` is a list of host-side sources tried in order (see
   "Credential injection")
-- `guest-env`, `KEY=value` lines for the guest, all `pjsb-placeholder-*`
-  values
+- `guest-env`, `KEY=value` lines for the guest: `pjsb-placeholder-*` tokens
+  and the CA paths its tools need
 - optionally `post-bootstrap.sh`, run as the guest user after the bootstrap
   (`claude`'s seeds `hasCompletedOnboarding` and
-  `bypassPermissionsModeAccepted` into `~/.claude.json`)
+  `bypassPermissionsModeAccepted` into `~/.claude.json`; `gh`'s points git's
+  github.com credential helper at `$GH_TOKEN`)
+- optionally an empty `unbrokered` file, for an agent the proxy can't broker
+  for (see "Credential injection")
 
 `spawn --agent gh,claude` picks profiles; with no `--agent`, every profile is
 picked. An unknown name is refused before `limactl` is called, with the valid
 names listed. The rendered `provision:` block is `lima/core-provision.yaml`,
 then each chosen profile's `provision.sh`, then the `--base` template. The
-chosen profiles' allowlists (comments and repeats dropped) and inject rules
-(one JSON array) are merged into `<state dir>/<task>/policy/allowlist` and
-`policy/inject.json` for the proxy, and the record gains `agents=gh,claude`.
-`guest-env` isn't delivered to the guest yet.
+chosen profiles' allowlists (comments and repeats dropped) and the brokered
+ones' inject rules (one JSON array) are merged into
+`<state dir>/<task>/policy/allowlist` and `policy/inject.json` for the proxy,
+and the record gains `agents=gh,claude`. Their `guest-env` lines go into the
+guest's bash login file, ahead of the zsh handoff, as `export` lines carried
+in the bootstrap script on ssh stdin, never argv.
 
 Spawn runs inside a git repo, and the task name doubles as the host branch
 name, so it has to pass `git check-ref-format --branch`. If the branch already
@@ -292,6 +299,21 @@ the proxy there. So the tokens live only in the proxy's environment. They
 never touch the caller's environment, a command line, the state or policy
 dir, or the guest.
 
+Each chosen profile has a credential state, recorded as
+`creds=gh:brokered,...` and shown in `status --json`:
+
+- `brokered`: its rules go to the proxy, and the guest gets its placeholders.
+- `unbrokered`: the profile has an `unbrokered` file. Its rules are left out
+  of the proxy's policy, its token is resolved by spawn from its own
+  `inject.json` sources, and the real token goes into the guest's login file
+  in place of the placeholder, as the old sandbox did. spawn warns, naming
+  the profile.
+- `none`: `--no-creds` was given, or the profile has no inject rules.
+  `--no-creds` resolves no token, sends no placeholder (the CA paths still
+  go) and starts the proxy with an empty `inject.json`, for every profile,
+  Claude included. `--agent` only picks profiles; it never grants a
+  credential on its own.
+
 ### The proxy CA
 
 `lib/ca.sh` makes the per-install CA the first time `spawn` needs it, under
@@ -308,7 +330,7 @@ Each profile's `guest-env` points its tools at it: `NODE_EXTRA_CA_CERTS` at
 The CA spike (`docs/spike-ca.md`) found that all of them can be brokered, so
 no profile is unbrokered. `profiles_test.sh` checks the profiles against that
 doc's Results table: marking an agent unbrokered there fails the suite until
-its profile has an `unbrokered` file and the fallback is built.
+its profile has an `unbrokered` file.
 
 ## Fetching
 

@@ -204,9 +204,27 @@ for bad in "$ca_dir/ca-key.pem" "$fixture/cert-and-key.pem" "$ca_dir/mitmproxy-c
 	assert_not_contains "$bad_out" "PRIVATE KEY" "refusing $(basename "$bad") prints no key"
 done
 
-for token in 'export GH_TOKEN' GITHUB_TOKEN CLAUDE_CODE_OAUTH_TOKEN; do
-	assert_not_contains "$script" "$token" "the bootstrap script has no $token line"
-done
+# --- the profiles' guest env reaches login shells, placeholders only ---
+
+# Every token variable the login file sets holds a placeholder.
+token_lines="$(grep -E '^export [A-Z_]*TOKEN=' "$profile" 2>/dev/null || true)"
+assert_contains "$token_lines" "export GH_TOKEN='pjsb-placeholder-gh'" "the login file sets GH_TOKEN to its placeholder"
+assert_eq "" "$(printf '%s\n' "$token_lines" | grep -v "='pjsb-placeholder-[a-z]*'$" || true)" \
+	"every token the login file sets is a placeholder"
+env_at="$(grep -n 'pj-sandbox: guest env' "$profile" | cut -d: -f1 || true)"
+handoff_at="$(grep -n 'exec zsh -l' "$profile" | cut -d: -f1 || true)"
+assert_ok "the guest env comes before the zsh handoff, so zsh inherits it" test "${env_at:-0}" -gt 0 -a "$env_at" -lt "${handoff_at:-0}"
+login_env="$(env -u ZSH_VERSION PJSANDBOX_ZSH_HANDED_OFF=1 sh -c '. "$1"; printf "%s|%s" "$GH_TOKEN" "$NODE_EXTRA_CA_CERTS"' sh "$profile" 2>&1 || true)"
+assert_eq "pjsb-placeholder-gh|/usr/local/share/ca-certificates/pjsb.crt" "$login_env" "a login shell gets the profiles' guest env"
+
+# A value with a quote in it survives, and a key that isn't a shell name is
+# refused rather than run.
+quoted="$(. "$PJ_SANDBOX_DIR/lib/bootstrap.sh" && pj_sandbox_bootstrap_script "$ca_dir/ca.pem" http://192.168.106.1:61050 "ODD=it's \$(here)")"
+quoted_env="$(printf '%s\n' "$quoted" | sed -n '/^PJSB_GUEST_ENV=/,/^)"$/p')"
+assert_eq "it's \$(here)" "$(sh -c "$quoted_env"'
+eval "$PJSB_GUEST_ENV"; printf "%s" "$ODD"')" "a guest env value is carried literally"
+if bad_out="$(. "$PJ_SANDBOX_DIR/lib/bootstrap.sh" && pj_sandbox_bootstrap_script "$ca_dir/ca.pem" http://192.168.106.1:61050 'X;reboot=1' 2>&1)"; then rc=0; else rc=$?; fi
+assert_exit_code 1 "$rc" "a guest env key that isn't a shell name is refused"
 
 # Running it again (by hand, say) adds no second handoff.
 printf '%s\n' "$script" | HOME="$GUEST_ROOT/home" PATH="$GUEST_BIN:$PATH" sh -s >/dev/null 2>&1

@@ -8,7 +8,9 @@
 # pj_test_stub_proxy BIN_DIR
 #
 # Writes into BIN_DIR:
-#   mitmdump  appends its argv to $STUB_DIR/mitmdump-calls, then idles until
+#   mitmdump  appends its argv to $STUB_DIR/mitmdump-calls and saves its
+#             environment, where the proxy's tokens are, to
+#             $STUB_DIR/mitmdump-env.<its PID>, then idles until
 #             killed or until $STUB_DIR is removed, so a test's own cleanup
 #             ends every stub proxy it left. With MITMDUMP_FAIL set it exits 1
 #             at once, like a mitmdump refusing a bad policy.
@@ -18,6 +20,7 @@ pj_test_stub_proxy() {
 	cat > "$1/mitmdump" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$STUB_DIR/mitmdump-calls"
+env > "$STUB_DIR/mitmdump-env.$$"
 [ -z "${MITMDUMP_FAIL:-}" ] || exit 1
 while [ -d "$STUB_DIR" ]; do sleep 1; done
 STUB

@@ -212,9 +212,8 @@ assert_contains "$(entries "$PROFILES/gh/guest-env")" "GIT_SSL_CAINFO=$GUEST_BUN
 
 # docs/spike-ca.md's Results table says, per check, whether that agent can be
 # brokered. A profile whose agent can't be carries an `unbrokered` file. None
-# does today. Marking one means building the fallback too: forward its token
-# as a real secret, ignore its inject.json, and flag it in status --json and
-# verify.
+# does today. spawn's fallback for one (its real token in the guest, its
+# inject.json ignored, `unbrokered` in status --json) is broker_e2e_test.sh's.
 SPIKE_CA="$PJ_SANDBOX_DIR/docs/spike-ca.md"
 findings="$(awk '/^## Findings$/ { on = 1; next } /^## / { on = 0 } on && NF' "$SPIKE_CA")"
 assert_ok "docs/spike-ca.md has a non-empty ## Findings section" test -n "$findings"

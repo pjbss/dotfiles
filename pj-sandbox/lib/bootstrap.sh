@@ -28,22 +28,46 @@ PJ_SANDBOX_GUEST_CA=/usr/local/share/ca-certificates/pjsb.crt
 # Where the guest's proxy environment for login shells goes.
 PJ_SANDBOX_GUEST_PROXY_PROFILE=/etc/profile.d/pjsb-proxy.sh
 
-# pj_sandbox_bootstrap_guest INSTANCE SSH_CONFIG DOTFILES_HOME CA_PEM PROXY_URL
+# pj_sandbox_bootstrap_guest INSTANCE SSH_CONFIG DOTFILES_HOME CA_PEM PROXY_URL [GUEST_ENV]
 #
 # Streams the dotfiles archive into the guest's ~/dotfiles, then runs
-# pj_sandbox_bootstrap_script CA_PEM PROXY_URL there, both over
+# pj_sandbox_bootstrap_script CA_PEM PROXY_URL GUEST_ENV there, both over
 # `ssh -F SSH_CONFIG INSTANCE`.
 pj_sandbox_bootstrap_guest() {
-	script="$(pj_sandbox_bootstrap_script "$4" "$5")" || return 1
+	script="$(pj_sandbox_bootstrap_script "$4" "$5" "${6:-}")" || return 1
 	pj_sandbox_dotfiles_archive "$3" |
 		ssh -F "$2" "$1" 'mkdir -p "$HOME/dotfiles" && tar -xf - -C "$HOME/dotfiles"' || return 1
 	printf '%s\n' "$script" | ssh -F "$2" "$1" 'sh -s'
 }
 
-# pj_sandbox_bootstrap_script CA_PEM PROXY_URL
+# _pj_sandbox_guest_env_exports GUEST_ENV
+#
+# Prints an `export KEY='value'` line for each KEY=value line of GUEST_ENV,
+# the value single-quoted. Fails on a KEY that isn't a shell name.
+_pj_sandbox_guest_env_exports() {
+	[ -n "$1" ] || return 0
+	printf '%s\n' "$1" | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		key="${line%%=*}"
+		if [ "$key" = "$line" ] || ! printf '%s\n' "$key" | grep -Eqx '[A-Za-z_][A-Za-z0-9_]*'; then
+			echo "pj-sandbox: guest env line '$key' isn't KEY=value" >&2
+			return 1
+		fi
+		printf "export %s='%s'\n" "$key" "$(printf '%s' "${line#*=}" | sed "s/'/'\\\\''/g")"
+	done
+}
+
+# pj_sandbox_bootstrap_script CA_PEM PROXY_URL [GUEST_ENV]
 #
 # Prints the script the guest runs as `sh -s`. It's POSIX sh, since the guest
 # runs it under dash.
+#
+# GUEST_ENV is KEY=value lines (lib/profiles.sh, pj_sandbox_profiles_guest_env):
+# placeholders, CA paths, and an unbrokered profile's real token. Each becomes
+# an `export KEY='value'` line in a quoted heredoc assigned at the top of the
+# script, so values travel on stdin and never in argv. The script writes them
+# into the bash login file just ahead of the zsh handoff, so the zsh that
+# takes over inherits them. A KEY that isn't a shell name is refused.
 #
 # PROXY_URL is the task's proxy, http://<IPv4>:<port> (lib/proxy.sh). It's
 # the one host value the script needs, so it's checked to be exactly that
@@ -96,8 +120,16 @@ pj_sandbox_bootstrap_script() {
 		return 1
 	fi
 
+	if ! guest_env="$(_pj_sandbox_guest_env_exports "${3:-}")"; then
+		return 1
+	fi
+
 	echo "set -eu"
 	echo
+	echo "PJSB_GUEST_ENV=\"\$(cat <<'PJSB_ENV'"
+	[ -z "$guest_env" ] || printf '%s\n' "$guest_env"
+	echo "PJSB_ENV"
+	echo ")\""
 	echo "PJSB_PROXY='$2'"
 	echo "PJSB_NO_PROXY='localhost,127.0.0.1,::1'"
 	echo "PJSB_PROXY_PROFILE=$PJ_SANDBOX_GUEST_PROXY_PROFILE"
@@ -121,6 +153,14 @@ printf 'pj-sandbox guest\n' | sudo tee /etc/pj-sandbox >/dev/null
 bash_login_file="$HOME/.profile"
 [ -f "$HOME/.bash_login" ] && bash_login_file="$HOME/.bash_login"
 [ -f "$HOME/.bash_profile" ] && bash_login_file="$HOME/.bash_profile"
+
+if [ -n "$PJSB_GUEST_ENV" ] && ! grep -qF "pj-sandbox: guest env" "$bash_login_file" 2>/dev/null; then
+	{
+		printf '\n# pj-sandbox: guest env, from the agent profiles. Each brokered token is a\n'
+		printf '# placeholder the host proxy swaps for the real one.\n'
+		printf '%s\n' "$PJSB_GUEST_ENV"
+	} >> "$bash_login_file"
+fi
 
 if ! grep -qF "pj-sandbox: hand off to zsh" "$bash_login_file" 2>/dev/null; then
 	cat >> "$bash_login_file" <<'PROFILE'
