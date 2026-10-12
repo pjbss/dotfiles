@@ -23,6 +23,32 @@ the host's `ssh`):
 - Lima's built-in network, which on vz is gvisor-tap-vsock
 - ssh over vsock (`ssh.overVsock`, the default for vz Linux guests)
 
+### mitmdump is blocked too
+
+Later the same day, `mitmdump --version` started failing on import. The
+uv-installed mitmproxy can't load its native extension:
+
+    ImportError: dlopen(.../mitmproxy_rs/mitmproxy_rs.abi3.so, 0x0002): ...
+    (mmap(size=0x1270040) failed with errno=1)
+
+`errno=1` is EPERM: the file exists, but mapping it executable is refused.
+That fits ThreatLocker applying its allowlist to unsigned native libraries,
+not just to executables. This is inferred, not confirmed from ThreatLocker's
+logs. The Python interpreter itself still runs. A `mitmdump` started at
+12:11, before the block, kept running, so the block only applies when the
+library is loaded.
+
+This reaches beyond this spike:
+
+- **pj-sandbox's own egress proxy is mitmdump** (`proxy/addon.py`, started
+  by `spawn` through `lib/proxy.sh`). So even a vz VM that boots can't get
+  a new task proxy on this host. Whatever replaces vmnet-hostonly also has
+  to answer what replaces mitmdump, or how mitmproxy can be loaded.
+- **The stand-in proxy in this doc's commands can't start.** `proxy-path`
+  only needs an HTTP `CONNECT` proxy on 127.0.0.1:8080, so a pure-Python
+  one (standard library only, no native extension) would do for the spike
+  runs.
+
 `spike-egress.md` is left as it was, as the record of the original decision.
 
 ## Pass criteria
