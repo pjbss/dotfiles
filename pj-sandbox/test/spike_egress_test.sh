@@ -16,7 +16,12 @@ PJ_SANDBOX_DIR="$(cd -P "$TEST_DIR/.." && pwd)"
 SPIKE="$PJ_SANDBOX_DIR/test/live/spike_egress.sh"
 SPIKE_LIMA_DIR="$PJ_SANDBOX_DIR/lima/spike"
 SPIKE_DOC="$PJ_SANDBOX_DIR/docs/spike-egress.md"
-CANDIDATES="vmnet-hostonly user-v2 gateway-vm"
+VZ_DOC="$PJ_SANDBOX_DIR/docs/spike-egress-vz.md"
+# The original candidates (spike-egress.md), and the vz ones added when
+# ThreatLocker started killing qemu and socket_vmnet (spike-egress-vz.md).
+ORIGINAL_CANDIDATES="vmnet-hostonly user-v2 gateway-vm"
+VZ_CANDIDATES="vz-usernet vz-tunnel"
+CANDIDATES="$ORIGINAL_CANDIDATES $VZ_CANDIDATES"
 
 # A limactl that records any call and fails, first on PATH.
 stub_dir="$(mktemp -d)"
@@ -132,11 +137,50 @@ for f in "$SPIKE_LIMA_DIR"/*.yaml; do
 	assert_contains "$(cat "$f")" "mounts: []" "$name pins mounts to an empty list, overriding Lima's default home mount"
 done
 
+# --- vz candidates ---
+
+for c in $VZ_CANDIDATES; do
+	cfg="$(grep -v '^[[:space:]]*#' "$SPIKE_LIMA_DIR/$c.yaml" 2>/dev/null || true)"
+	assert_contains "$cfg" "vmType: vz" "$c.yaml boots with vz, not qemu"
+	assert_eq "" "$(printf '%s\n' "$cfg" | grep -E 'lima: *(host|shared|bridged)|socket:' || true)" "$c.yaml needs no socket_vmnet network"
+done
+
+out="$("$SPIKE" --dry-run --candidate vz-usernet 2>&1)" || true
+assert_contains "$out" "blackhole 192.168.5.3" "vz-usernet blackholes Lima's resolver"
+assert_contains "$out" "192.168.5.2:8080" "vz-usernet reaches the host proxy at host.lima.internal by default"
+
+out="$("$SPIKE" --dry-run --candidate vz-tunnel 2>&1)" || true
+assert_contains "$out" "ip link set eth0 down" "vz-tunnel takes eth0 down"
+assert_contains "$out" "-R 127.0.0.1:3128:127.0.0.1:8080" "vz-tunnel opens a reverse tunnel from the guest's 3128 to the host proxy"
+assert_contains "$out" "PROXY=127.0.0.1:3128" "vz-tunnel's guest uses the tunnel as its proxy"
+teardown="$(printf '%s\n' "$out" | sed -n '/^== Teardown/,$p')"
+assert_contains "$teardown" "stop the reverse tunnel" "vz-tunnel's teardown stops the tunnel"
+out="$("$SPIKE" --dry-run --candidate vz-usernet 2>&1)" || true
+assert_not_contains "$out" "-R 127.0.0.1:3128" "vz-usernet opens no tunnel"
+
+# A NIC the lockdown took down mustn't make the reroute and macvlan probes
+# pass without trying: the attacker brings it back up first, and uses the
+# link subnets the guest booted with.
+probe="$(printf '%s\n' "$out" | sed -n '/^== Probes/,/^== Host checks/p')"
+assert_contains "$probe" 'ip link set "$dev" up' "the probes bring each NIC back up"
+assert_contains "$probe" "/run/pjsb-spike-boot-links" "macvlan uses the link subnets the guest booted with"
+enforce="$(printf '%s\n' "$out" | sed -n '/^== Enforce/,/^== Probes/p')"
+assert_contains "$enforce" "> /run/pjsb-spike-boot-links" "enforcement snapshots the boot-time link subnets first"
+
+assert_eq "" "$(cat "$stub_dir/limactl.calls" 2>/dev/null || true)" "the vz dry runs never call limactl"
+
 # --- write-up skeleton ---
+
+assert_ok "pj-sandbox/docs/spike-egress-vz.md exists" test -f "$VZ_DOC"
+vz_doc="$(cat "$VZ_DOC" 2>/dev/null || true)"
+for c in $VZ_CANDIDATES; do
+	assert_contains "$vz_doc" "## Candidate: $c" "spike-egress-vz.md has a section for $c"
+done
+assert_eq "## Findings" "$(grep -E '^## ' "$VZ_DOC" 2>/dev/null | tail -1)" "spike-egress-vz.md ends with a ## Findings section"
 
 assert_ok "pj-sandbox/docs/spike-egress.md exists" test -f "$SPIKE_DOC"
 doc="$(cat "$SPIKE_DOC" 2>/dev/null || true)"
-for c in $CANDIDATES; do
+for c in $ORIGINAL_CANDIDATES; do
 	assert_contains "$doc" "## Candidate: $c" "spike-egress.md has a section for $c"
 done
 assert_eq "## Findings" "$(grep -E '^## ' "$SPIKE_DOC" 2>/dev/null | tail -1)" "spike-egress.md ends with a ## Findings section"

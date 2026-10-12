@@ -54,6 +54,7 @@ These rules keep the old and new tooling from interfering while both exist:
   `bin/`, `lib/` and `test/`.
 - `test/live/`: scripts that need a real Mac host with Lima, so they are run
   by hand and never by `make test` (`spike_egress.sh`, the egress spike,
+  whose `vz-*` candidates are written up in `docs/spike-egress-vz.md`,
   `spike_ca.sh`, the CA and pinning spike, and `run.sh`, the live security
   suite, run with `make sandbox-live-test`). `test/run.sh` skips the whole
   directory, even a `*_test.sh` in it.

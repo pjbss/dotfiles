@@ -1,0 +1,47 @@
+# vz-tunnel.yaml
+#
+# Egress spike (vz), candidate 2: vmType vz with ssh over vsock, so the
+# guest needs no network card for ssh. The guest's lockdown takes eth0
+# down entirely; the host then opens `ssh -R 127.0.0.1:3128:<host proxy>`
+# over vsock, and the guest's only proxy is 127.0.0.1:3128. Lima can't boot
+# a vz VM without its built-in NIC, so root can still bring eth0 back up:
+# this tests whether the guest can work with no NIC in use at all.
+#
+# Booted only by pj-sandbox/test/live/spike_egress.sh, as a throwaway
+# pjsb-spike-* instance. See pj-sandbox/docs/spike-egress-vz.md.
+
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/ubuntu-lts
+
+# Apple Virtualization.framework, inside limactl itself: no qemu process.
+vmType: vz
+
+memory: "2GiB"
+
+# No host mounts at all, overriding Lima's default read-only home mount.
+mounts: []
+
+containerd:
+  system: false
+  user: false
+
+ssh:
+  forwardAgent: false
+  overVsock: true
+
+# No `networks:`: only Lima's built-in network, which on vz is
+# gvisor-tap-vsock inside limactl. Nothing here needs socket_vmnet.
+
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+    command -v dig >/dev/null 2>&1 || { apt-get update; apt-get install -y bind9-dnsutils; }
+    command -v nc >/dev/null 2>&1 || { apt-get update; apt-get install -y netcat-openbsd; }
+    command -v nft >/dev/null 2>&1 || { apt-get update; apt-get install -y nftables; }
+    command -v docker >/dev/null 2>&1 || curl -fsSL https://get.docker.com | sh
+    docker image inspect alpine >/dev/null 2>&1 || docker pull alpine

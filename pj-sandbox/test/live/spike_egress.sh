@@ -17,6 +17,14 @@
 #                   (PJ_SPIKE_HOST_FILTER); proxy at host.lima.internal:8080
 #   gateway-vm      a second Lima VM running nftables + mitmdump is the agent
 #                   VM's only route; proxy at the gateway's address, port 8080
+#   vz-usernet      vmType vz, Lima's built-in network only; eth0's default
+#                   route deleted and Lima's resolver blackholed; proxy on
+#                   the host's 127.0.0.1:8080, reached at 192.168.5.2:8080
+#   vz-tunnel       vmType vz, ssh over vsock, eth0 taken down; proxy reached
+#                   through `ssh -R 127.0.0.1:3128:<host proxy>`, so the
+#                   guest's proxy is 127.0.0.1:3128 (host side: PJ_SPIKE_HOST_PROXY)
+# The vz candidates need neither qemu nor socket_vmnet, which ThreatLocker
+# kills on the host (pj-sandbox/docs/spike-egress-vz.md).
 #
 # Escape attempts, each run as root in the guest against a non-allowlisted
 # target and printed as PASS (blocked) or FAIL (reached):
@@ -27,9 +35,10 @@
 #   [lan-rfc1918]        a LAN (RFC1918) address
 #   [docker-macvlan]     a Docker container on a macvlan network
 #   [flush-and-reroute]  direct TCP and DNS again after `iptables -F`,
-#                        `nft flush ruleset` and pointing the default route
-#                        at every gateway the guest booted with (run last,
-#                        since it wrecks the guest's network)
+#                        `nft flush ruleset`, bringing every NIC back up and
+#                        pointing the default route at every gateway the
+#                        guest booted with (run last, since it wrecks the
+#                        guest's network)
 #
 # Checks that must keep working, printed PASS (works) or FAIL (broken):
 #   [proxy-path]  HTTPS to PJ_SPIKE_ALLOWED_HOST through the proxy
@@ -60,9 +69,12 @@
 #                                           installs the outside filter
 #   PJ_SPIKE_HOST_UNFILTER                  user-v2 only: host command that
 #                                           removes it, run at teardown
+#   PJ_SPIKE_HOST_PROXY                     vz-tunnel only: the host proxy the
+#                                           tunnel ends at (127.0.0.1:8080)
 #
-# For vmnet-hostonly and user-v2 a proxy (e.g. `mitmdump --listen-port 8080`)
-# must already be listening on the host. gateway-vm starts its own.
+# For vmnet-hostonly, user-v2 and both vz candidates a proxy (e.g. `mitmdump
+# --listen-port 8080`) must already be listening on the host; for the vz
+# ones, on 127.0.0.1. gateway-vm starts its own.
 
 set -euo pipefail
 
@@ -113,11 +125,18 @@ done
 
 [ -n "$candidate" ] || die "--candidate is required: vmnet-hostonly, user-v2 or gateway-vm (see --help)"
 
+# vz-tunnel: the guest-side end of the reverse tunnel, and the host proxy it
+# ends at.
+TUNNEL_PORT=3128
+HOST_PROXY="${PJ_SPIKE_HOST_PROXY:-127.0.0.1:8080}"
+
 case "$candidate" in
 	vmnet-hostonly) default_proxy="192.168.106.1:8080" ;;
 	user-v2) default_proxy="host.lima.internal:8080" ;;
 	gateway-vm) default_proxy="<gateway-lima0-address>:8080" ;;
-	*) die "unknown candidate '$candidate': expected vmnet-hostonly, user-v2 or gateway-vm" ;;
+	vz-usernet) default_proxy="192.168.5.2:8080" ;;
+	vz-tunnel) default_proxy="127.0.0.1:$TUNNEL_PORT" ;;
+	*) die "unknown candidate '$candidate': expected vmnet-hostonly, user-v2, gateway-vm, vz-usernet or vz-tunnel" ;;
 esac
 
 TARGET="${PJ_SPIKE_TARGET:-1.1.1.1}"
@@ -153,6 +172,7 @@ enforce_script() {
 	cat <<EOF
 set -u
 ip -4 route show default > /run/pjsb-spike-boot-routes
+ip -4 route show scope link proto kernel > /run/pjsb-spike-boot-links
 EOF
 	case "$candidate" in
 		vmnet-hostonly)
@@ -171,6 +191,21 @@ EOF
 # Blackhole Lima's built-in NAT NIC and route everything via the gateway VM.
 while ip -4 route del default dev eth0 2>/dev/null; do :; done
 ip -4 route replace default via $1 dev lima0
+EOF
+			;;
+		vz-usernet)
+			cat <<'EOF'
+# eth0's link route to 192.168.5.2 (the host) is all that's left; Lima's
+# resolver on the same subnet is blackholed.
+while ip -4 route del default dev eth0 2>/dev/null; do :; done
+ip -4 route replace blackhole 192.168.5.3/32
+EOF
+			;;
+		vz-tunnel)
+			cat <<'EOF'
+# No NIC in use at all: ssh rides vsock, and the proxy arrives through the
+# host's reverse tunnel on 127.0.0.1.
+ip link set eth0 down
 EOF
 			;;
 	esac
@@ -228,8 +263,11 @@ macvlan_escape() {
 	reached=1
 	for dev in $(ls /sys/class/net); do
 		case "$dev" in lo | docker* | veth* | br-*) continue ;; esac
-		subnet="$(ip -4 route show dev "$dev" scope link proto kernel | awk '{print $1; exit}')"
+		# The subnet the NIC booted with, since the lockdown may have taken
+		# the NIC down and its routes with it. The attacker brings it back.
+		subnet="$(awk -v d="$dev" '$0 ~ "dev " d " " || $0 ~ "dev " d "$" {print $1; exit}' /run/pjsb-spike-boot-links)"
 		[ -n "$subnet" ] || continue
+		ip link set "$dev" up
 		gw="$(awk -v d="$dev" '$0 ~ "dev " d " " || $0 ~ "dev " d "$" {print $3; exit}' /run/pjsb-spike-boot-routes)"
 		docker network rm pjsb-spike-mv >/dev/null 2>&1 || true
 		docker network create -d macvlan -o parent="$dev" --subnet "$subnet" ${gw:+--gateway "$gw"} pjsb-spike-mv >/dev/null 2>&1 || continue
@@ -249,6 +287,8 @@ flush_and_reroute() {
 	iptables -F; iptables -P OUTPUT ACCEPT; iptables -t nat -F
 	ip6tables -F 2>/dev/null; ip6tables -P OUTPUT ACCEPT 2>/dev/null
 	nft flush ruleset 2>/dev/null
+	for dev in $(ls /sys/class/net); do ip link set "$dev" up; done
+	sleep 3
 	reached=1
 	while read -r _ _ gw _ dev _; do
 		[ -n "$gw" ] || continue
@@ -303,6 +343,15 @@ run_or_print() {
 
 host_ssh() {
 	run_or_print ssh -F "${LIMA_HOME:-$HOME/.lima}/$1/ssh.config" "lima-$1" true
+}
+
+# tunnel_cmd INSTANCE: vz-tunnel's reverse tunnel. Over the instance's own
+# ssh (vsock), the guest's 127.0.0.1:TUNNEL_PORT ends at HOST_PROXY on the
+# host, so the guest reaches its proxy without using any NIC.
+tunnel_cmd() {
+	echo ssh -F "${LIMA_HOME:-$HOME/.lima}/$1/ssh.config" -N \
+		-o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+		-R "127.0.0.1:$TUNNEL_PORT:$HOST_PROXY" "lima-$1"
 }
 
 limactl_start() {
@@ -364,6 +413,11 @@ if [ "$dry_run" -eq 1 ]; then
 	echo "== Enforce (limactl shell $agent_instance sudo bash -s) =="
 	enforce_script "<gateway-lima0-address>"
 	echo
+	if [ "$candidate" = vz-tunnel ]; then
+		echo "== Reverse tunnel (in the background, from the host) =="
+		tunnel_cmd "$agent_instance"
+		echo
+	fi
 	echo "== Probes (limactl shell $agent_instance sudo bash -s) =="
 	probe_script "$SSH_HOST" "$TARGET"
 	echo
@@ -371,6 +425,7 @@ if [ "$dry_run" -eq 1 ]; then
 	echo "[host-ssh] $(host_ssh "$agent_instance")"
 	echo
 	echo "== Teardown (always, even after a failure) =="
+	[ "$candidate" != vz-tunnel ] || echo "kill <tunnel pid>   (stop the reverse tunnel)"
 	for inst in $gw_instance $agent_instance; do
 		echo "limactl delete --force $inst"
 	done
@@ -398,9 +453,11 @@ done
 
 started=""
 filtered=0
+tunnel_pid=""
 teardown() {
 	status=$?
 	trap - EXIT INT TERM
+	[ -z "$tunnel_pid" ] || kill "$tunnel_pid" 2>/dev/null || true
 	if [ "$filtered" -eq 1 ] && [ -n "${PJ_SPIKE_HOST_UNFILTER:-}" ]; then
 		sh -c "$PJ_SPIKE_HOST_UNFILTER" || echo "spike_egress.sh: PJ_SPIKE_HOST_UNFILTER failed" >&2
 	fi
@@ -438,6 +495,14 @@ if [ "$candidate" = user-v2 ]; then
 fi
 
 enforce_script "$gw_addr" | limactl shell "$agent_instance" sudo bash -s
+
+if [ "$candidate" = vz-tunnel ]; then
+	# shellcheck disable=SC2046 # tunnel_cmd prints one word per argument
+	$(tunnel_cmd "$agent_instance") &
+	tunnel_pid=$!
+	sleep 3
+	kill -0 "$tunnel_pid" 2>/dev/null || die "the reverse tunnel into $agent_instance didn't stay up (is a proxy listening on $HOST_PROXY?)"
+fi
 
 echo "== Probes (root in $agent_instance) =="
 rc=0
