@@ -9,17 +9,22 @@
 # wrappers, so the scripts stay runnable directly (and testable) without make.
 
 .DEFAULT_GOAL := help
-.PHONY: help test lint install sync
+.PHONY: help test lint install sync sandbox-live-test
 
 help: ## Show this help
 	@grep -E '^[a-z][a-zA-Z0-9_-]*:.*## ' $(MAKEFILE_LIST) | \
-		awk -F':.*## ' '{ printf "  %-10s %s\n", $$1, $$2 }'
+		awk -F':.*## ' '{ printf "  %-18s %s\n", $$1, $$2 }'
 
 test: ## Run every *_test.sh (optionally: make test PATTERN=ssh)
 	@test/run.sh $(PATTERN)
 
 lint: ## Syntax-check every shell source (plus shellcheck, if installed)
 	@test/lint.sh
+
+# Boots a real pj-sandbox VM, so it needs a Mac host with Lima and is never
+# part of `test` (issues/manual-tests.md, MT-6).
+sandbox-live-test: ## Attack a real pj-sandbox VM (needs Lima; not part of test)
+	@pj-sandbox/test/live/run.sh
 
 install: ## Symlink the dotfiles into $HOME and render agent skills
 	@./install.sh

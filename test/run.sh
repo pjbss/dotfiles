@@ -14,6 +14,9 @@
 # find over a missing directory exits non-zero, which under `set -e` would
 # silently truncate the discovery mid-list rather than fail loudly.
 #
+# pj-sandbox/test/live/ is pruned: its suites boot real VMs and run only on
+# demand (`make sandbox-live-test`), never as part of the test contract.
+#
 # Every file is run even after one fails, so a single invocation reports the
 # whole picture rather than stopping at the first red file. Each is run as a
 # subprocess (not sourced), so one test's fixtures, shadowed `limactl`/`ssh`
@@ -46,7 +49,7 @@ done
 
 cd "$DOTFILES_HOME"
 
-test_files="$(find sandbox/test zsh/modules/test agents/test pj-sandbox/test -type f -name '*_test.sh' 2>/dev/null || true)"
+test_files="$(find sandbox/test zsh/modules/test agents/test pj-sandbox/test -path pj-sandbox/test/live -prune -o -type f -name '*_test.sh' -print 2>/dev/null || true)"
 test_files="$(printf '%s\n' "$test_files" | sed 's|^\./||' | sort)"
 
 if [ -n "$pattern" ]; then

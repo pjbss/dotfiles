@@ -53,8 +53,10 @@ These rules keep the old and new tooling from interfering while both exist:
 - `test/`: `*_test.sh` files, which `make test` runs. `make lint` also checks
   `bin/`, `lib/` and `test/`.
 - `test/live/`: scripts that need a real Mac host with Lima, so they are run
-  by hand and never by `make test` (`spike_egress.sh`, the egress spike, and
-  `spike_ca.sh`, the CA and pinning spike).
+  by hand and never by `make test` (`spike_egress.sh`, the egress spike,
+  `spike_ca.sh`, the CA and pinning spike, and `run.sh`, the live security
+  suite, run with `make sandbox-live-test`). `test/run.sh` skips the whole
+  directory, even a `*_test.sh` in it.
 - `lima/template.yaml`: the hardened base config every VM is rendered from
   (`lib/render.sh`). It has `mounts: []`, so no host directory is mounted.
 - `lima/core-provision.yaml`: the provision step every VM gets (Docker,
