@@ -359,6 +359,38 @@ ssh joins its command into one string for the guest shell to re-split
 arrive unchanged. All three refuse a task with no state record, or one whose
 VM Lima doesn't report as `Running`, before calling ssh.
 
+## Verifying a sandbox
+
+`pj-sandbox verify <task>` checks a running sandbox from the host and prints
+one `PASS`, `FAIL` or `SKIP` line per check. Any `FAIL` makes it exit 1.
+
+- `mounts`: `limactl list --json <instance>` shows no mounts.
+- `no-tokens`: no brokered token from the task's `policy/inject.json` is in
+  the guest session's `env`, any `/proc/*/environ`, `/etc/environment`,
+  `/etc/profile.d`, any file under `$HOME` (the login files, and the config
+  and credential files agents keep there, such as `~/.config/gh/hosts.yml`)
+  or `/workspace`. The walk skips symlinks, `.git/objects` and files over
+  4 MiB. The host sends only a fingerprint of each
+  token: a salted sha256 prefix of one 12-character window from its middle
+  (`lib/verify_scan.py`). It sends one window rather than all of them,
+  because overlapping windows' hashes would let someone recover the token a
+  character at a time. The scan runs under `sudo -n` when it can, so it can
+  read every process. An unbrokered profile gets a `SKIP`, since its real
+  token is in the guest by design.
+- `egress-denied`: the task is in `deny` mode, and a guest `curl` to a fresh
+  `pjsb-verify-<random>.invalid` host fails, with a `deny` for it in
+  `egress.log`. Both probes only count log entries written after they
+  started.
+- `ca-trusted`: a guest `curl` succeeds to the first exact allowlisted host
+  that GET may reach, and `egress.log` shows the proxy let it through. A
+  request that went around the proxy would see the real certificate and
+  prove nothing about the CA.
+- `marker`: `/etc/pj-sandbox` exists.
+
+Every guest check is a script piped to `pj-sandbox exec <task> -- sh -s`.
+This shows the sandbox was configured correctly. It isn't proof against a
+guest that's already hostile, since the guest answers its own checks.
+
 ## Tearing down
 
 `pj-sandbox rm <task> [--fetch]` removes one task. With `--fetch` it runs
