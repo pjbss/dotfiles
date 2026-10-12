@@ -29,7 +29,7 @@ export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT
 export CALLS="$fixture/calls"
 # Resolves without a network, so the live path stays hermetic.
 export PJ_SANDBOX_LIVE_DENIED_HOST=localhost
-mkdir -p "$HOME" "$fixture/bin"
+mkdir -p "$HOME" "$fixture/bin" "$fixture/lima-bin"
 
 cat > "$fixture/bin/limactl" <<STUB
 #!/bin/sh
@@ -118,7 +118,43 @@ assert_exit_code 1 "$rc" "a failing spawn makes the suite exit 1"
 task="$(awk '$1 == "spawn" { print $2; exit }' "$CALLS")"
 assert_eq "rm $task" "$(tail -1 "$CALLS")" "rm runs even when spawn fails, so a half-built VM isn't left behind"
 assert_not_contains "$(cat "$CALLS")" "exec" "no attack runs after spawn fails"
-assert_eq "" "$(cat "$fixture/limactl.calls" 2>/dev/null || true)" "the suite never calls limactl itself"
+assert_eq "" "$(cat "$fixture/limactl.calls" 2>/dev/null || true)" "the suite doesn't touch limactl when rm succeeds"
+
+# spawn writes the task's record last, so one that fails partway leaves a VM
+# that `rm` can't see (it refuses a task with no record). The suite then
+# deletes that VM by its exact name, and nothing else: not via gc, which
+# would also take another spawn still in flight.
+cat > "$fixture/lima-bin/limactl" <<STUB
+#!/bin/sh
+echo "limactl \$*" >> "$fixture/limactl.calls"
+case "\$1" in
+	list) echo pjsb-other; awk '\$1 == "spawn" { print "pjsb-" \$2 }' "\$CALLS" ;;
+	delete) exit 0 ;;
+	*) exit 99 ;;
+esac
+STUB
+chmod +x "$fixture/lima-bin/limactl"
+: > "$CALLS"
+: > "$fixture/limactl.calls"
+out="$(STUB_FAIL="spawn rm" PATH="$fixture/lima-bin:$PATH" PJ_SANDBOX_LIVE_CLI="$fixture/bin/pj-sandbox" "$SUITE" 2>&1 </dev/null)" || true
+task="$(awk '$1 == "spawn" { print $2; exit }' "$CALLS")"
+lima_calls="$(cat "$fixture/limactl.calls")"
+assert_contains "$lima_calls" "limactl delete --force pjsb-$task" "a VM left by a failed spawn is deleted by name when rm can't"
+assert_not_contains "$lima_calls" "pjsb-other" "no other pjsb- VM is touched"
+assert_not_contains "$out" "by hand" "the suite doesn't ask for manual cleanup it just did"
+
+# rm fails and Lima has no such VM: nothing to delete, and no false alarm.
+: > "$CALLS"
+: > "$fixture/limactl.calls"
+cat > "$fixture/lima-bin/limactl" <<STUB
+#!/bin/sh
+echo "limactl \$*" >> "$fixture/limactl.calls"
+[ "\$1" = list ] && { echo pjsb-other; exit 0; }
+exit 99
+STUB
+out="$(STUB_FAIL="spawn rm" PATH="$fixture/lima-bin:$PATH" PJ_SANDBOX_LIVE_CLI="$fixture/bin/pj-sandbox" "$SUITE" 2>&1 </dev/null)" || true
+assert_not_contains "$(cat "$fixture/limactl.calls")" "delete" "with no VM left behind, nothing is deleted"
+assert_not_contains "$out" "by hand" "with no VM left behind, there's no call for manual cleanup"
 
 # --- guest scripts ---
 #

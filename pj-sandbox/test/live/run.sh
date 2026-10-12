@@ -5,7 +5,8 @@
 # user story 24; issue 027). Spawns a disposable live-* task (Lima VM
 # pjsb-live-*) from a scratch repo, attacks it from inside the guest the ways
 # a hostile agent would, runs `pj-sandbox verify` on it, and then `rm`s it,
-# even after a failure or Ctrl-C. It needs a real Mac host with Lima and
+# even after a failure or Ctrl-C. If spawn failed partway, so there's no
+# record for `rm`, the VM it left is deleted by its exact name instead. It needs a real Mac host with Lima and
 # socket_vmnet, so it's run by hand (`make sandbox-live-test`; MT-6 in
 # issues/manual-tests.md) and never by `make test`.
 #
@@ -72,6 +73,9 @@ LIVE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 PJ_SANDBOX_HOME="$(cd -P "$LIVE_DIR/../.." && pwd)"
 PJ_SANDBOX_DOTFILES_HOME="$(cd -P "$PJ_SANDBOX_HOME/.." && pwd)"
 export PJ_SANDBOX_HOME PJ_SANDBOX_DOTFILES_HOME
+
+# shellcheck source=../../lib/namespace.sh
+. "$PJ_SANDBOX_HOME/lib/namespace.sh"
 
 usage() {
 	sed -n '2,/^$/p' "$SOURCE" | sed 's/^# \{0,1\}//'
@@ -407,12 +411,25 @@ repo="$work/repo"
 marker="$work/hook-escape-marker"
 spawned=0
 
+# delete_leftover_vm: spawn writes the task's record last, so one that
+# failed partway leaves a VM that `rm` refuses (no record). Delete that one
+# VM by its exact name, which holds this run's timestamp and PID. Not `gc`,
+# which would also take any other spawn still in flight.
+delete_leftover_vm() {
+	instance="$(pj_sandbox_instance_name "$TASK")"
+	if limactl list --quiet 2>/dev/null | grep -qx "$instance"; then
+		echo "run.sh: spawn didn't finish, so $instance has no record for rm; deleting it directly" >&2
+		limactl delete --force "$instance" ||
+			echo "run.sh: 'limactl delete --force $instance' failed; delete it by hand" >&2
+	fi
+}
+
 teardown() {
 	status=$?
 	trap - EXIT INT TERM
 	if [ "$spawned" -eq 1 ]; then
 		echo "== Teardown =="
-		"$CLI" rm "$TASK" || echo "run.sh: '$CLI rm $TASK' failed; delete pjsb-$TASK by hand" >&2
+		"$CLI" rm "$TASK" || delete_leftover_vm
 	fi
 	rm -rf "$work"
 	exit "$status"
