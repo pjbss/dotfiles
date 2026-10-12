@@ -123,7 +123,7 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-[ -n "$candidate" ] || die "--candidate is required: vmnet-hostonly, user-v2 or gateway-vm (see --help)"
+[ -n "$candidate" ] || die "--candidate is required: vmnet-hostonly, user-v2, gateway-vm, vz-usernet or vz-tunnel (see --help)"
 
 # vz-tunnel: the guest-side end of the reverse tunnel, and the host proxy it
 # ends at.
@@ -310,10 +310,12 @@ blocked dns-tcp dig +tcp +time=3 +tries=1 "@$RESOLVER" "$DNS_NAME"
 blocked ssh-22 nc -z -w 5 "$SSH_ADDR" 22
 # [lan-rfc1918] a LAN address
 blocked lan-rfc1918 nc -z -w 5 "$LAN_ADDR" "$LAN_PORT"
+# [proxy-path] the allowlisted path through the proxy still works. Before
+# docker-macvlan, which brings NICs back up: for vz-tunnel this has to run
+# with eth0 still down.
+works proxy-path curl -sk -o /dev/null --max-time 15 -x "http://$PROXY" "https://$ALLOWED_HOST/"
 # [docker-macvlan] a container on a macvlan network
 blocked docker-macvlan macvlan_escape
-# [proxy-path] the allowlisted path through the proxy still works
-works proxy-path curl -sk -o /dev/null --max-time 15 -x "http://$PROXY" "https://$ALLOWED_HOST/"
 # [flush-and-reroute] iptables -F + nft flush + a route change, then TCP and
 # DNS again. Last, because it wrecks the guest's network.
 blocked flush-and-reroute flush_and_reroute
@@ -347,9 +349,13 @@ host_ssh() {
 
 # tunnel_cmd INSTANCE: vz-tunnel's reverse tunnel. Over the instance's own
 # ssh (vsock), the guest's 127.0.0.1:TUNNEL_PORT ends at HOST_PROXY on the
-# host, so the guest reaches its proxy without using any NIC.
+# host, so the guest reaches its proxy without using any NIC. Lima's
+# ssh.config multiplexes (ControlMaster auto, ControlPersist yes): through
+# it, this ssh would hand -R to the shared master and exit at once, leaving
+# no process for the liveness check to watch or teardown to kill.
 tunnel_cmd() {
 	echo ssh -F "${LIMA_HOME:-$HOME/.lima}/$1/ssh.config" -N \
+		-o ControlMaster=no -o ControlPath=none \
 		-o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
 		-R "127.0.0.1:$TUNNEL_PORT:$HOST_PROXY" "lima-$1"
 }
@@ -497,11 +503,15 @@ fi
 enforce_script "$gw_addr" | limactl shell "$agent_instance" sudo bash -s
 
 if [ "$candidate" = vz-tunnel ]; then
+	# A reverse tunnel doesn't touch its host end until the guest connects,
+	# so ExitOnForwardFailure can't notice a missing proxy. Check it here.
+	nc -z -G 3 "${HOST_PROXY%:*}" "${HOST_PROXY##*:}" >/dev/null 2>&1 ||
+		die "nothing is listening on the host proxy $HOST_PROXY (start one, e.g. mitmdump --listen-host ${HOST_PROXY%:*} --listen-port ${HOST_PROXY##*:})"
 	# shellcheck disable=SC2046 # tunnel_cmd prints one word per argument
 	$(tunnel_cmd "$agent_instance") &
 	tunnel_pid=$!
 	sleep 3
-	kill -0 "$tunnel_pid" 2>/dev/null || die "the reverse tunnel into $agent_instance didn't stay up (is a proxy listening on $HOST_PROXY?)"
+	kill -0 "$tunnel_pid" 2>/dev/null || die "the reverse tunnel into $agent_instance didn't stay up (couldn't connect, or the guest's 127.0.0.1:$TUNNEL_PORT was already taken)"
 fi
 
 echo "== Probes (root in $agent_instance) =="

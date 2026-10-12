@@ -15,8 +15,9 @@ unprivileged with `--version`. This is permanent. Every pj-sandbox VM is
 "Findings"), so none can boot.
 
 `limactl` itself still runs. It has the `com.apple.security.virtualization`
-entitlement, so on Lima 2.2.0 the following run inside `limactl`, with no
-other binary involved:
+entitlement, so on Lima 2.2.0 the following run inside `limactl`, with
+neither blocked binary involved (host-side ssh into the guest still uses
+the host's `ssh`):
 
 - `vmType: vz`, using Apple's Virtualization.framework
 - Lima's built-in network, which on vz is gvisor-tap-vsock
@@ -29,8 +30,8 @@ other binary involved:
 The same as `spike-egress.md`, with the same labels, controls and teardown:
 `spike_egress.sh` runs every escape attempt against every candidate.
 
-For both vz candidates, `flush-and-reroute` and `docker-macvlan` play a
-stronger attacker. They bring every NIC back up and use the link subnets
+For every candidate (the original three included), `flush-and-reroute` and
+`docker-macvlan` play a stronger attacker. They bring every NIC back up and use the link subnets
 the guest booted with, which the lockdown snapshots to
 `/run/pjsb-spike-boot-links` before it does anything. Without that, a NIC
 the lockdown took down would make both probes pass without trying
@@ -111,7 +112,13 @@ Commands:
     pj-sandbox/test/live/spike_egress.sh --candidate vz-tunnel
 
 Set `PJ_SPIKE_HOST_PROXY` if the stand-in proxy listens somewhere other than
-127.0.0.1:8080.
+127.0.0.1:8080. The script checks that something is listening there before
+it opens the tunnel, because a reverse tunnel only contacts its host end
+when the guest connects. The tunnel's ssh runs with `ControlMaster=no` and
+`ControlPath=none`. Lima's `ssh.config` multiplexes, so without those
+options the tunnel would be handed to the shared master connection and
+couldn't be watched or stopped. `proxy-path` runs before `docker-macvlan`
+brings `eth0` back up, so for this candidate it is tested with `eth0` down.
 
 Results (not yet run):
 

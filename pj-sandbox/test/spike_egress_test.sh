@@ -169,6 +169,102 @@ assert_contains "$enforce" "> /run/pjsb-spike-boot-links" "enforcement snapshots
 
 assert_eq "" "$(cat "$stub_dir/limactl.calls" 2>/dev/null || true)" "the vz dry runs never call limactl"
 
+# The candidate list in the "required" error names every candidate.
+out="$("$SPIKE" 2>&1)" || true
+for c in $CANDIDATES; do
+	assert_contains "$out" "$c" "the --candidate-required error names '$c'"
+done
+
+# Lima's ssh.config multiplexes (ControlMaster auto, ControlPersist yes), so
+# a tunnel ssh that used it would hand -R to the shared master and exit at
+# once, leaving nothing for the liveness check or teardown to hold.
+out="$("$SPIKE" --dry-run --candidate vz-tunnel 2>&1)" || true
+tunnel_line="$(printf '%s\n' "$out" | grep -- ' -R 127.0.0.1:3128' || true)"
+assert_contains "$tunnel_line" "-o ControlMaster=no" "the tunnel ssh doesn't become or use a mux master"
+assert_contains "$tunnel_line" "-o ControlPath=none" "the tunnel ssh ignores Lima's ControlPath"
+
+# Each NIC-up line is pinned inside its own function.
+probe="$(printf '%s\n' "$out" | sed -n '/^== Probes/,/^== Host checks/p')"
+macvlan_fn="$(printf '%s\n' "$probe" | sed -n '/^macvlan_escape() {$/,/^}$/p')"
+flush_fn="$(printf '%s\n' "$probe" | sed -n '/^flush_and_reroute() {$/,/^}$/p')"
+assert_contains "$macvlan_fn" 'ip link set "$dev" up' "docker-macvlan brings each NIC back up"
+assert_contains "$flush_fn" 'ip link set "$dev" up' "flush-and-reroute brings each NIC back up"
+
+# proxy-path runs before anything brings a NIC back up, so for vz-tunnel it
+# really is tested with eth0 down.
+proxy_line="$(printf '%s\n' "$probe" | grep -n '^works proxy-path' | cut -d: -f1)"
+macvlan_line="$(printf '%s\n' "$probe" | grep -n '^blocked docker-macvlan' | cut -d: -f1)"
+if [ -n "$proxy_line" ] && [ -n "$macvlan_line" ] && [ "$proxy_line" -lt "$macvlan_line" ]; then
+	echo "PASS: proxy-path runs before docker-macvlan brings eth0 back up"
+else
+	echo "FAIL: proxy-path runs before docker-macvlan brings eth0 back up (proxy-path line ${proxy_line:-none}, docker-macvlan line ${macvlan_line:-none})"
+	failures=$((failures + 1))
+fi
+
+# --- vz-tunnel live path ---
+#
+# limactl, ssh, nc and dig are stubbed; every address is an IP literal, so
+# nothing touches the network. The tunnel ssh stub stays up until it's
+# signalled, like a real one, and records that it was.
+
+live="$(mktemp -d)"
+mkdir -p "$live/bin"
+cat > "$live/bin/limactl" <<STUB
+#!/bin/sh
+echo "limactl \$*" >> "$live/calls"
+case "\$1" in
+	shell) cat >/dev/null ;;
+esac
+exit 0
+STUB
+cat > "$live/bin/ssh" <<STUB
+#!/bin/sh
+case "\$*" in
+	*" -R "*)
+		echo "tunnel \$*" >> "$live/calls"
+		# Let go of the caller's output, so a tunnel nobody kills can't hold
+		# the test's command substitution open; give up after 15s instead.
+		exec >/dev/null 2>&1
+		trap 'echo "tunnel killed" >> "$live/calls"; exit 0' TERM
+		n=0
+		while [ "\$n" -lt 75 ]; do sleep 0.2; n=\$((n + 1)); done
+		echo "tunnel never killed" >> "$live/calls"
+		;;
+esac
+exit 0
+STUB
+# The host proxy answers only when PROXY_UP=1.
+cat > "$live/bin/nc" <<'STUB'
+#!/bin/sh
+case "$*" in
+	*" 18080") [ "${PROXY_UP:-0}" = 1 ] ;;
+	*) exit 0 ;;
+esac
+STUB
+printf '#!/bin/sh\nexit 0\n' > "$live/bin/dig"
+chmod +x "$live/bin/"*
+run_live() {
+	PATH="$live/bin:$PATH" PJ_SPIKE_HOST_PROXY=127.0.0.1:18080 PJ_SPIKE_SSH_HOST=192.0.2.22 \
+		PJ_SPIKE_LAN_ADDR=192.0.2.1 "$SPIKE" --candidate vz-tunnel </dev/null 2>&1
+}
+
+: > "$live/calls"
+if out="$(PROXY_UP=0 run_live)"; then rc=0; else rc=$?; fi
+assert_exit_code 1 "$rc" "vz-tunnel stops when nothing listens on the host proxy"
+assert_contains "$out" "127.0.0.1:18080" "the missing-proxy error names the host proxy"
+assert_eq "" "$(grep '^tunnel ' "$live/calls" || true)" "no tunnel is started without a host proxy"
+assert_contains "$(cat "$live/calls")" "limactl delete --force pjsb-spike-vz-tunnel" "the VM is still deleted"
+
+: > "$live/calls"
+out="$(PROXY_UP=1 run_live)" || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q 'tunnel killed' "$live/calls" && break; sleep 0.2; done
+calls="$(cat "$live/calls")"
+assert_contains "$calls" "-o ControlMaster=no" "the live tunnel ssh runs without the mux master"
+assert_contains "$calls" "tunnel killed" "teardown stops the tunnel ssh it started"
+assert_contains "$calls" "limactl delete --force pjsb-spike-vz-tunnel" "teardown deletes the VM"
+assert_not_contains "$out" "didn't stay up" "a tunnel that stays up isn't reported as dead"
+rm -rf "$live"
+
 # --- write-up skeleton ---
 
 assert_ok "pj-sandbox/docs/spike-egress-vz.md exists" test -f "$VZ_DOC"
