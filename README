@@ -175,7 +175,7 @@ entry, and copied a `.code-workspace` file across if the repo has one.
 **3. Plan interactively.** Still inside the VM, run `claude` and work through:
 
     /pj-clarify        # answers questions until the shape of the work is settled
-    /pj-write-prd      # writes issues/prd.md -- confirm the user stories
+    /pj-write-prd      # drafts issues/prd.md -- approve it once its stories are right
     /pj-plan-issues    # decomposes it into issues/NNN-slug.md, dependency-ordered
 
 This is the part worth your attention. Everything downstream is only as good as
