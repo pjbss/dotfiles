@@ -276,7 +276,7 @@ esac
 git rev-parse --show-toplevel >/dev/null 2>&1 || fail "must be run from inside a git repository"
 project_root="$PWD"
 
-[ -d issues ] || fail "no issues/ directory in $project_root -- this loop takes the directory you run it from as the project, not the repository root, so cd to wherever issues/ lives. If the work isn't planned yet, start with pj-write-prd and pj-plan-issues."
+[ -d issues ] || fail "no issues/ directory in $project_root -- this loop takes the directory you run it from as the project, not the repository root, so cd to wherever issues/ lives. If the work isn't planned yet, start with pj-write-prd, pj-write-plan and pj-plan-issues."
 command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
 
 # --- the test gate ----------------------------------------------------------

@@ -1,14 +1,14 @@
 ---
 name: pj-write-prd
-description: Converts an understood product idea (ideally after pj-clarify) into a structured, human-approved PRD at issues/prd.md (or issues/prd-<name>.md), documenting problem, solution, user stories with acceptance-criteria IDs, and key decisions. Use once the idea is well understood and before decomposing it into issues with pj-plan-issues.
+description: Converts an understood product idea (ideally after pj-clarify) into a structured, human-approved PRD at issues/prd.md (or issues/prd-<name>.md), documenting problem, solution, user stories with acceptance-criteria IDs, and key decisions. Use once the idea is well understood and before planning it with pj-write-plan.
 tags: [workflow, planning]
 ---
 
 # Write PRD
 
 Purpose: turn a clarified idea into a single written source of truth, a PRD
-under `issues/`, that `pj-plan-issues` will later decompose into
-implementable work. Its stories and criteria carry stable IDs so later
+under `issues/`, that `pj-write-plan` turns into a plan and
+`pj-plan-issues` then cuts into implementable work. Its stories and criteria carry stable IDs so later
 documents can trace back to them, and nothing downstream starts from it
 until the human has approved it.
 
@@ -115,4 +115,4 @@ an edited PRD marked approved.
 
 `issues/prd.md` or `issues/prd-<name>.md`, following the template above,
 marked approved only if the human approved it. Nothing else is created or
-modified. Suggest `pj-plan-issues` as the next step.
+modified. Suggest `pj-write-plan` as the next step.

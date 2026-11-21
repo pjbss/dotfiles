@@ -129,6 +129,29 @@ run_pj_issues "$broken" validate
 assert_exit_code 1 "$rc" "validate exits 1 when a blocker points at a nonexistent issue"
 assert_contains "$out" "077-ghost.md" "validate names the missing blocker"
 
+# --- validate on a stacked tree ---
+
+# write_layer DIR NAME LAYER BLOCKED_BY_BODY -- an issue cut from a plan layer.
+write_layer() {
+	write_issue "$1" "$2" "$4"
+	printf '\n## Branch\n\nw/0%s\n\n## Plan section\n\n`issues/plan.md` Layer %s\n' "$3" "$3" >> "$1/$2"
+}
+
+stacked="$fixture_root/stacked"
+mkdir -p "$stacked"
+printf '# Plan — w\n\nStatus: approved (2026-11-20)\n\n## Stack\n\n| # | Branch | Delivers | Depends on | ~non-test lines |\n|---|---|---|---|---|\n| 1 | w/01 | US-1 | trunk | 10 |\n| 2 | w/02 | US-2 | 1 | 10 |\n' \
+	> "$stacked/plan.md"
+write_layer "$stacked" "001-one.md" 1 "None - can start immediately"
+write_layer "$stacked" "002-two.md" 2 "- Blocked by \`issues/001-one.md\`"
+
+run_pj_issues "$stacked" validate
+assert_exit_code 0 "$rc" "validate exits 0 on a well-formed stacked tree"
+
+write_issue "$stacked" "003-loose.md" "- Blocked by \`issues/002-two.md\`"
+run_pj_issues "$stacked" validate
+assert_exit_code 1 "$rc" "validate exits 1 when an open issue has no branch beside stacked ones"
+assert_contains "$out" "003-loose.md: no '## Branch'" "validate names the unbranched issue"
+
 # --- the drained-queue signal the loop relies on ---
 
 drained="$fixture_root/drained"

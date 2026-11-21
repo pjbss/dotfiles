@@ -22,7 +22,10 @@
 #   graph     The dependency graph as a Mermaid diagram.
 #   validate  Structural check: required sections present, blockers resolve to
 #             real files, no cycles, no duplicate numbers, nothing sitting in
-#             done/ with unchecked criteria. Exits non-zero on any problem.
+#             done/ with unchecked criteria. Once any open issue is a stack
+#             layer (has a ## Branch), also that the open issues form one
+#             chain in the plan's layer order with matching, unique branches.
+#             Exits non-zero on any problem.
 #   status    One-line summary, for a SessionStart hook to inject.
 #
 # Run from anywhere inside the repo; the issues directory is resolved relative
@@ -66,7 +69,7 @@ else
 fi
 
 if [ ! -d "$issues_dir" ]; then
-	printf "%spj-issues:%s no issues directory at '%s' -- run pj-write-prd then pj-plan-issues first\n" \
+	printf "%spj-issues:%s no issues directory at '%s' -- run pj-write-prd, pj-write-plan, then pj-plan-issues first\n" \
 		"$C_RED" "$C_RESET" "$issues_dir" >&2
 	exit 1
 fi
@@ -152,6 +155,13 @@ case "$command_name" in
 			echo "$name: in a dependency cycle -- it can never become ready"
 			problems=$((problems + 1))
 		done
+
+		# Stack-layer rules; a no-op unless some open issue has a ## Branch.
+		stack_problems="$(pj_issues_validate_stack "$issues_dir" || true)"
+		if [ -n "$stack_problems" ]; then
+			printf '%s\n' "$stack_problems"
+			problems=$((problems + $(printf '%s\n' "$stack_problems" | wc -l)))
+		fi
 
 		if [ "$problems" -ne 0 ]; then
 			printf '%s%s problem(s)%s\n' "$C_RED" "$problems" "$C_RESET" >&2

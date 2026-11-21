@@ -24,7 +24,7 @@
 #
 # Example:
 #   pj-sbx-spawn my-task --base none --no-creds
-#   pj-sbx-ssh my-task          # plan interactively: pj-clarify, pj-write-prd, pj-plan-issues
+#   pj-sbx-ssh my-task          # plan interactively: pj-clarify, pj-write-prd, pj-write-plan, pj-plan-issues
 #   pj-sbx-run my-task --max-issues 1
 #
 # The loop itself lives in the guest because that's where the work happens;
