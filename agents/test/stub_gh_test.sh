@@ -115,8 +115,12 @@ assert_exit_code 1 "$rc" "an unknown stack subcommand exits non-zero"
 gh pr list
 assert_exit_code 1 "$rc" "a gh command outside stack exits non-zero"
 
-log="$(cat "$(git -C "$repo" rev-parse --absolute-git-dir)/stub-gh.log")"
+log_file="$(git -C "$repo" rev-parse --absolute-git-dir)/stub-gh.log"
+log="$(cat "$log_file")"
 assert_contains "$log" "stack init --base main s/01-a" "every call is logged with its arguments"
 assert_contains "$log" "stack rebase --upstack --no-trunk" "including the rebase"
+assert_contains "$log" "stack init --base main s/01-a [stdin:/dev/null]" "a call with stdin from /dev/null is marked as such"
+(cd "$repo" && echo y | "$GH" stack view --json >/dev/null 2>&1) || true
+assert_eq "stack view --json [stdin:other]" "$(tail -n 1 "$log_file")" "a call reading some other stdin is marked differently"
 
 assert_report

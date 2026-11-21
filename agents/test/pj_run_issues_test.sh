@@ -285,13 +285,17 @@ make_repo() {
 }
 
 # run_loop PROJECT_DIR [ARGS...]
+#
+# The loop's stdin is a regular file, not /dev/null: a test asserting that the
+# loop gives each gh call </dev/null must not pass merely because the suite
+# itself was started with stdin from /dev/null, as it is under an agent.
 run_loop() {
 	local repo="$1"
 	shift
-	if out="$(cd "$repo" && PATH="$stub_bin:$PATH" \
+	if out="$(cd "$repo" && PATH="$stub_bin:${STUB_GH_DIR:+$STUB_GH_DIR:}$PATH" \
 		PJ_SANDBOX_MARKER="$marker" \
 		STUB_MODE="${STUB_MODE:-normal}" STUB_VERDICT="${STUB_VERDICT:-approved}" \
-		NO_COLOR=1 "$RUN_ISSUES" "$@" 2>&1)"; then
+		NO_COLOR=1 "$RUN_ISSUES" "$@" <"$marker" 2>&1)"; then
 		rc=0
 	else
 		rc=$?
@@ -955,5 +959,132 @@ assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" \
 	"the manual test plan is not committed with the issue"
 assert_ok "the manual test plan is never picked up as an issue" \
 	test -f "$repo/issues/manual-tests.md"
+
+# === stack mode =============================================================
+
+STUBS="$TEST_DIR/stubs"
+
+# make_stacked_repo NAME [PLAN_STATUS] -- make_repo's two slices, cut from an
+# approved plan as layers w/01-slice and w/02-slice on the repo's current
+# branch as trunk. Passes pj-issues validate. Echoes the project path.
+make_stacked_repo() {
+	local project
+	project="$(make_repo "$1" 2)"
+	local trunk
+	trunk="$(git -C "$project" branch --show-current)"
+	local n
+	for n in 1 2; do
+		printf '\n## Branch\n\nw/0%s-slice\n\n## Plan section\n\n`issues/plan.md` Layer %s\n' "$n" "$n" \
+			>> "$project/issues/00$n-slice.md"
+	done
+	printf '# Plan — x\n\nStatus: %s\nTrunk: %s\n\n## Stack\n\n| # | Branch | Delivers | Depends on | ~non-test lines |\n|---|---|---|---|---|\n| 1 | w/01-slice | US-1 | trunk | 10 |\n| 2 | w/02-slice | US-2 | 1 | 10 |\n' \
+		"${2:-approved (2026-11-21)}" "$trunk" > "$project/issues/plan.md"
+	echo "$project"
+}
+
+gh_log() { cat "$(git -C "$1" rev-parse --absolute-git-dir)/stub-gh.log" 2>/dev/null || true; }
+commits_between() { git -C "$1" rev-list --count "$2..$3"; }
+
+# --- a two-layer stack, from the trunk ---
+
+project="$(make_stacked_repo stack-fresh)"
+trunk="$(git -C "$project" branch --show-current)"
+STUB_GH_DIR="$STUBS" run_loop "$project"
+assert_exit_code 0 "$rc" "a two-layer stacked queue runs to completion"
+calls="$(gh_log "$project")"
+assert_contains "$calls" "stack init --base $trunk w/01-slice" "layer 1's branch is created with init on the trunk"
+assert_contains "$calls" "stack top" "layer 2 first moves to the top of the stack"
+assert_contains "$calls" "stack add w/02-slice" "and adds its branch there"
+assert_eq "1" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1 gets exactly one commit"
+assert_eq "1" "$(commits_between "$project" w/01-slice w/02-slice)" "layer 2 gets exactly one commit, on top of layer 1"
+assert_ok "layer 2's branch contains layer 1's commit" git -C "$project" merge-base --is-ancestor w/01-slice w/02-slice
+assert_eq "w/02-slice" "$(git -C "$project" branch --show-current)" "the run ends on the top layer"
+assert_eq "" "$(printf '%s\n' "$calls" | grep -v '\[stdin:/dev/null\]$' || true)" \
+	"every gh call the loop made had stdin from /dev/null"
+
+# --- refusals, all before any claude invocation ---
+
+project="$(make_stacked_repo stack-draft "draft")"
+env_log="$fixture_root/stack-draft-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 1 "$rc" "a stacked issue whose plan is a draft is refused"
+assert_contains "$out" "isn't approved" "the refusal says the plan needs approving"
+assert_not_ok "no claude invocation happened before the draft-plan refusal" test -s "$env_log"
+
+project="$(make_stacked_repo stack-off-trunk)"
+trunk="$(git -C "$project" branch --show-current)"
+git -C "$project" checkout -q -b elsewhere
+env_log="$fixture_root/stack-off-trunk-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 1 "$rc" "a fresh stacked run off the plan's trunk is refused"
+assert_contains "$out" "elsewhere" "the refusal names the current branch"
+assert_contains "$out" "$trunk" "and the plan's trunk"
+assert_not_ok "no claude invocation happened before the off-trunk refusal" test -s "$env_log"
+
+no_gh="$fixture_root/no-gh-stack"
+mkdir -p "$no_gh"
+printf '#!/bin/sh\necho "unknown command \\"stack\\" for \\"gh\\"" >&2\nexit 1\n' > "$no_gh/gh"
+chmod +x "$no_gh/gh"
+project="$(make_stacked_repo stack-no-gh)"
+env_log="$fixture_root/stack-no-gh-env.log"
+STUB_GH_DIR="$no_gh" STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 1 "$rc" "a stacked run without gh stack is refused"
+assert_contains "$out" "gh-stack" "the refusal names the missing extension"
+assert_not_ok "no claude invocation happened before the missing-extension refusal" test -s "$env_log"
+
+# --- resuming on an existing stack ---
+
+project="$(make_stacked_repo stack-resume)"
+trunk="$(git -C "$project" branch --show-current)"
+(
+	cd "$project"
+	PATH="$STUBS:$PATH"
+	gh stack init --base "$trunk" w/01-slice >/dev/null </dev/null
+	echo "layer 1" > layer1.txt && git add layer1.txt && git commit -q -m "Implement 001-slice"
+	mkdir -p issues/done && mv issues/001-slice.md issues/done/
+	sed -i.bak 's/^- \[ \]/- [x]/' issues/done/001-slice.md && rm issues/done/001-slice.md.bak
+	gh stack add w/02-slice >/dev/null </dev/null
+	# Resumed from the trunk, not from layer 1's tip, so layer 2's branch is
+	# somewhere other than HEAD: the one-commit check has to count from the
+	# branch it lands on, or layer 1's commit would be folded into layer 2's.
+	git checkout -q "$trunk"
+)
+setup_calls="$(gh_log "$project" | wc -l | tr -d ' ')"
+STUB_GH_DIR="$STUBS" run_loop "$project"
+assert_exit_code 0 "$rc" "a resumed stacked run completes"
+resumed_calls="$(gh_log "$project" | sed "1,${setup_calls}d")"
+assert_not_contains "$resumed_calls" "stack init" "resuming makes no init call"
+assert_not_contains "$resumed_calls" "stack add" "and no add call for a branch the stack already has"
+assert_eq "w/02-slice" "$(git -C "$project" branch --show-current)" "layer 2's existing branch is checked out"
+assert_eq "1" "$(commits_between "$project" w/01-slice w/02-slice)" "and layer 2 is committed there, once"
+assert_ok "layer 2 still sits on layer 1's commit, rather than folding it in" \
+	git -C "$project" merge-base --is-ancestor w/01-slice w/02-slice
+assert_not_contains "$out" "rewinding" "checking out an existing layer isn't mistaken for a premature commit"
+
+# --- a gh stack call that fails ---
+
+project="$(make_stacked_repo stack-add-fails)"
+trunk="$(git -C "$project" branch --show-current)"
+git -C "$project" branch w/02-slice
+STUB_GH_DIR="$STUBS" run_loop "$project"
+assert_exit_code 1 "$rc" "a failing gh stack add stops the run with exit 1"
+assert_contains "$out" "gh stack add w/02-slice" "the stop names the command that failed"
+assert_eq "1" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1 was committed before the failure"
+assert_eq "0" "$(commits_between "$project" "$trunk" w/02-slice)" "nothing was committed for layer 2"
+assert_not_ok "layer 2 was never implemented" test -f "$project/stub-work-002-slice.txt"
+
+# --- unstacked queues never touch gh ---
+
+project="$(make_repo stack-unstacked 2)"
+STUB_GH_DIR="$STUBS" run_loop "$project"
+assert_exit_code 0 "$rc" "an unstacked queue runs as before with the stub gh on PATH"
+assert_eq "" "$(gh_log "$project")" "an unstacked queue makes no gh calls at all"
+
+# --- docs ---
+
+assert_contains "$readme_flat" "stack mode" "the README describes stack mode"
+assert_contains "$readme_flat" "gh stack init --base" "including how it creates the first layer"
+assert_contains "$header_flat" "Stack mode" "the script header describes stack mode"
+assert_contains "$header_flat" "isn't approved" "and its refusals"
 
 assert_report

@@ -28,7 +28,11 @@ git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
 	exit 1
 }
 state="$git_dir/stub-gh-stack"
-printf '%s\n' "$*" >> "$git_dir/stub-gh.log"
+# Each call is logged with where its stdin came from: the loop must give every
+# gh call </dev/null, since gh-stack prompts when it thinks it can.
+stdin_from=other
+[ /dev/stdin -ef /dev/null ] && stdin_from=/dev/null
+printf '%s [stdin:%s]\n' "$*" "$stdin_from" >> "$git_dir/stub-gh.log"
 
 die() {
 	printf '%s\n' "$2" >&2

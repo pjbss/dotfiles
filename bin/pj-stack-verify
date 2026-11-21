@@ -31,6 +31,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 . "$DOTFILES_HOME/sandbox/lib/color.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
 . "$DOTFILES_HOME/agents/lib/gate.sh"
+. "$DOTFILES_HOME/agents/lib/stack.sh"
 
 fail() {
 	printf "%spj-stack-verify:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
@@ -66,13 +67,8 @@ command -v gh >/dev/null 2>&1 && gh stack --version </dev/null >/dev/null 2>&1 |
 stack_json="$(gh stack view --json </dev/null 2>&1)" ||
 	fail "can't read the stack: $(printf '%s' "$stack_json" | tail -n 1)"
 
-# Bottom layer first: gh-stack v0.3.0 lists `branches` in stack order, from
-# the one on the trunk up to the top.
-layers="$(printf '%s' "$stack_json" | python3 -c '
-import json, sys
-for branch in json.load(sys.stdin)["branches"]:
-    print(branch["name"])
-')" || fail "couldn't parse 'gh stack view --json'"
+# Bottom layer first (agents/lib/stack.sh).
+layers="$(printf '%s' "$stack_json" | pj_stack_layers)" || fail "couldn't parse 'gh stack view --json'"
 [ -n "$layers" ] || fail "the stack has no branches to verify"
 
 pj_gate_resolve "$test_cmd" || fail "$pj_gate_error"

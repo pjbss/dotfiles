@@ -226,6 +226,18 @@ its work in the working tree; the loop stages it, gates it, has it reviewed, and
 makes the commit itself. So an issue the review never clears leaves the branch
 untouched, and the queue and the history can't disagree about what is done.
 
+When the issues came from a plan, they carry a `## Branch`, and the loop runs in
+stack mode: each issue is built on its own `gh stack` branch, one layer per
+issue in plan order, still one commit each. Start on the plan's trunk: the
+first layer is created with `gh stack init --base <trunk>`, each later one with
+`gh stack top` and `gh stack add`. It refuses to start when the plan isn't
+approved or the gh-stack extension isn't available (sandboxes have it), and a
+fresh stack off the trunk is refused too, naming both branches. A stopped run
+picks up where it left off: a layer whose branch the stack already has is
+checked out, never created twice. Nothing is published -- `gh stack submit` and
+friends are yours to run from the host once you've read the layers, after
+`pj-stack-verify` has run the gate on every one.
+
 It prints what it is doing while it does it, one line per tool call, each
 labeled with the agent that produced it -- `tdd` while `pj-tdd` implements,
 `rev` and `qual` while the two reviewers read, `fix` during a remediation pass,
@@ -480,6 +492,17 @@ commit is made by `pj-commit` in its own process rather than by the implementing
 agent, so "exactly one commit per issue" doesn't depend on an agent having
 followed an instruction; an implementation that commits anyway is rewound into
 the working tree rather than refused.
+
+Stack mode keeps all of that and adds one step in front of each issue. An
+issue with a `## Branch` (one cut from a plan by `pj-plan-issues`) is built on
+its own branch: the loop checks it out if the stack already has it, starts the
+stack with `gh stack init --base <trunk>` for the first layer, or runs
+`gh stack top` and `gh stack add` for the next. The one-commit check counts
+from that branch's tip, so it holds per layer. Every `gh` call reads
+`/dev/null`, since gh-stack prompts when it thinks it can, and any failing one
+stops the run with the command and its output. The plan's approval and the
+extension are checked before anything runs, so a run that can't build its
+stack never starts one. Issues without a branch make no `gh` calls at all.
 
 Each of those processes is asked for its event stream rather than its final
 message, and `agents/lib/stream_render.py` turns that back into one labeled

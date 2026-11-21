@@ -118,6 +118,18 @@
 # hook skips silently when it finds none. The session-start hook reads the same
 # PJ_TEST_CMD to tell the agent what its gate is.
 #
+# Stack mode. When the queue was cut from a plan (its issues carry `## Branch`),
+# each issue is built on its own gh stack branch, one layer per issue, in plan
+# order, and still gets exactly one commit. Before anything runs, the loop
+# refuses if the plan isn't approved or the gh-stack extension isn't
+# available. Per issue: a branch the stack already has is checked out (a run
+# resumed after a stop carries on where it left off, never duplicating or
+# reordering a layer); otherwise the first layer starts the stack with
+# `gh stack init --base <trunk>`, which must be checked out, and later ones
+# go on top with `gh stack top` and `gh stack add`. Every gh call reads
+# /dev/null, and a failing one stops the run. The end-of-run sweep runs on the
+# top layer. Publishing the stack stays the human's step.
+#
 # Sets PJ_RUN_ISSUES=1 too, a separate marker meaning "an unattended loop run":
 # the guard hook refuses to publish a stack (gh stack submit, push, sync,
 # merge, link, unstack) under it, even on the host, because publishing is the
@@ -134,6 +146,8 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 . "$DOTFILES_HOME/sandbox/lib/color.sh"
 . "$DOTFILES_HOME/agents/lib/gate.sh"
+. "$DOTFILES_HOME/agents/lib/issues.sh"
+. "$DOTFILES_HOME/agents/lib/stack.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
 
 # Declared in one place so a terminal that mangles them is a three-line fix
@@ -371,6 +385,28 @@ if [ -n "$(git status --porcelain)" ]; then
 	fail "the working tree is dirty. Each issue has to become exactly one reviewable commit, which isn't possible on top of uncommitted changes -- commit or stash them first."
 fi
 
+# --- stack mode ------------------------------------------------------------
+#
+# A queue cut from a plan (pj-plan-issues) gives each issue a `## Branch`:
+# then each issue is built on its own gh stack branch, one layer per issue,
+# in plan order. Checked up front so a run that can't build its stack stops
+# before any agent has done any work. pj-issues validate has already made
+# sure a stacked queue is one consistent chain of one existing plan.
+stack_trunk=""
+first_issue="$("$BIN_DIR/pj-issues" next 2>/dev/null || true)"
+if [ -n "$first_issue" ] && [ -n "$(pj_issues_branch "$first_issue")" ]; then
+	plan_ref="$(pj_issues_plan_ref "$first_issue")"
+	plan_file="$(pj_issues_plan_file "$PJ_ISSUES_DIR" "$first_issue")"
+	plan_status="$(pj_issues_doc_status "$plan_file")"
+	[ "$plan_status" = approved ] ||
+		fail "$(basename "$first_issue") is a layer of $plan_ref, which isn't approved (Status: ${plan_status:-none}) -- a stack is built only from a plan you've approved."
+	gh stack --version </dev/null >/dev/null 2>&1 ||
+		fail "$(basename "$first_issue") is a stack layer, and stack mode needs the gh-stack extension, but 'gh stack' isn't available -- install it with 'gh extension install github/gh-stack'."
+	stack_trunk="$(pj_issues_doc_header "$plan_file" Trunk)"
+	[ -n "$stack_trunk" ] || fail "$plan_ref has no 'Trunk:' line, so there is no branch to build the stack on."
+	say "stack mode: one gh stack branch per layer of $plan_ref, on $stack_trunk"
+fi
+
 # --- dry run ---------------------------------------------------------------
 
 if [ -n "$dry_run" ]; then
@@ -534,6 +570,50 @@ make_test_gate() {
 	return "$gate_status"
 }
 
+# run_gh ARGS... -- one gh call, stdin from /dev/null (gh-stack prompts when it
+# thinks it can, and an unattended run has nobody to answer). A failure stops
+# the run, showing the command and what it printed.
+run_gh() {
+	if ! gh_output="$(gh "$@" </dev/null 2>&1)"; then
+		say_phase git "'gh $*' failed -- stopping"
+		printf '%s\n' "$gh_output" | sed 's/^/             /'
+		log "stopped: 'gh $*' failed: $gh_output"
+		exit 1
+	fi
+}
+
+# prepare_layer BRANCH -- puts the working tree on BRANCH, the gh stack layer
+# the next issue is built on. A branch the stack already has (a resumed run)
+# is checked out; otherwise a new stack starts on the plan's trunk, or the
+# branch is added on top of the existing one -- the only place gh-stack
+# v0.3.0 allows an add.
+prepare_layer() {
+	layer_branch="$1"
+
+	if stack_json="$(gh stack view --json </dev/null 2>/dev/null)"; then
+		if printf '%s' "$stack_json" | pj_stack_layers | grep -qxF "$layer_branch"; then
+			say_phase git "resuming on $layer_branch, which the stack already has"
+			git checkout -q "$layer_branch" || {
+				log "stopped: couldn't check out $layer_branch"
+				fail "couldn't check out $layer_branch"
+			}
+			return 0
+		fi
+		say_phase git "adding $layer_branch on top of the stack"
+		run_gh stack top
+		run_gh stack add "$layer_branch"
+		return 0
+	fi
+
+	current_branch="$(git symbolic-ref --quiet --short HEAD || echo "a detached HEAD")"
+	if [ "$current_branch" != "$stack_trunk" ]; then
+		log "stopped: a new stack needs $stack_trunk checked out, not $current_branch"
+		fail "a stacked run starts on the plan's trunk, '$stack_trunk', or resumes from a branch of its stack, and '$current_branch' is neither -- check out '$stack_trunk' and run again."
+	fi
+	say_phase git "starting the stack: $layer_branch on $stack_trunk"
+	run_gh stack init --base "$stack_trunk" "$layer_branch"
+}
+
 completed=0
 # Set by every break that ends the run on a problem rather than on a drained
 # queue or --max-issues, so the sweep below can tell the two apart.
@@ -556,9 +636,19 @@ while :; do
 	issue_slug="${issue_name%.md}"
 	issue_log="$run_dir/$issue_slug.log"
 
+	# A stacked issue is built on its own layer. Issues without a branch
+	# take none of this and make no gh calls, exactly as before stack mode.
+	issue_branch="$(pj_issues_branch "$issue_path")"
+	if [ -n "$issue_branch" ]; then
+		[ -n "$stack_trunk" ] || fail "$issue_name is a stack layer, but the run didn't start in stack mode -- run pj-issues validate"
+		prepare_layer "$issue_branch"
+	fi
+
 	say_phase tdd "implementing $issue_name"
 	log "implementing $issue_name"
 
+	# Taken after the layer's branch is in place, so the premature-commit
+	# rewind and the one-commit check below are per layer.
 	commit_before="$(git rev-parse HEAD)"
 
 	run_claude "Use the pj-tdd skill to implement exactly this one issue: $issue_path
