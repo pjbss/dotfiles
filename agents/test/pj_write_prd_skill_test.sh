@@ -17,20 +17,16 @@ TEST_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$TEST_DIR/../.." && pwd)"
 
 . "$DOTFILES_HOME/test/assert.sh"
+. "$TEST_DIR/skill_doc.sh"
 
 skill="$DOTFILES_HOME/agents/skills/pj-write-prd/SKILL.md"
 
-# The PRD template: everything inside the ```markdown fence.
-template="$(awk '/^```markdown$/ { inside = 1; next } inside && /^```$/ { exit } inside' "$skill")"
-# The rest of the skill: its process and output sections.
-process="$(awk '/^```markdown$/ { inside = 1; next } inside && /^```$/ { inside = 0; next } !inside' "$skill")"
-
-flatten() { printf '%s' "$1" | tr '\n' ' ' | tr -s ' '; }
+template="$(skill_template "$skill")"
+process="$(skill_prose "$skill")"
 process_flat="$(flatten "$process")"
 template_flat="$(flatten "$template")"
 
-# heading_line HEADING -- line number of an exact heading in the template, or empty.
-heading_line() { printf '%s\n' "$template" | { grep -n -x -F "$1" || true; } | cut -d: -f1; }
+heading_line() { exact_line_number "$template" "$1"; }
 
 # --- Status line ---
 
@@ -69,6 +65,12 @@ assert_contains "$process_flat" '`issues/prd-<name>.md`' \
 	"the process names a second PRD issues/prd-<name>.md"
 assert_not_ok "the process no longer offers a dated PRD file" \
 	grep -q -w "dated" <<<"$process"
+
+# --- human-only checks ---
+
+assert_contains "$template_flat" 'go into the plan'"'"'s test plan (`pj-write-test-plan`)' \
+	"Testing Decisions sends human-only checks to the test plan"
+assert_not_contains "$template_flat" "manual-tests.md" "Testing Decisions no longer points at issues/manual-tests.md"
 
 # --- README planning step ---
 

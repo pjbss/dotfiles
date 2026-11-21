@@ -35,17 +35,29 @@ one out of order.
      system state, and clearly list what's left for a human. Never force
      those parts through.
    - **A criterion only a person can confirm** (a visual UI check, driving
-     a real terminal session): don't stop for it. `pj-plan-issues` is
-     supposed to have kept these out of acceptance criteria and put them in
-     `issues/manual-tests.md`; one that slipped through gets moved there
-     now. Delete the criterion from the issue's `## Acceptance criteria` and
-     append it to `issues/manual-tests.md` as the next `MT-N` entry, in the
-     shape the entries already there use: a `## MT-N — <short name>`
-     heading, a `Source:` line naming this issue, numbered steps, and a
-     bolded `**Expect:**` line saying what passing looks like. Create the
-     file with a `# Manual test plan` heading if it doesn't exist yet, and
-     continue its numbering if it does. Then carry on — build the behavior
-     as normal, only its *verification* moves.
+     a real terminal session): don't stop for it. Planning is supposed to
+     have kept these out of acceptance criteria and put them in the
+     manual-test file; one that slipped through gets moved there now.
+     If the issue has a `## Plan section`, that is the test plan named by
+     the `Test plan:` header of the plan it points at. For an issue
+     with no `## Plan section`, it is `issues/manual-tests.md`. Delete the
+     criterion from the issue's `## Acceptance criteria` and add it to that
+     file as its next manual case:
+
+     - **In a test plan**: the next `### MT-n — <short name>` case under
+       `## 4. Manual test cases`, in the shape `pj-write-test-plan`
+       defines (a `Source:` line naming the story and this issue's branch,
+       `Preconditions:`, a step table, the `Result:` line). Put the `MT-n`
+       in that criterion's row of the Traceability table.
+     - **In `issues/manual-tests.md`**: the next `## MT-N — <short name>`
+       entry, in the shape the entries already there use: a `Source:` line
+       naming this issue, numbered steps, and a bolded `**Expect:**` line
+       saying what passing looks like. Create the file with a
+       `# Manual test plan` heading if it doesn't exist yet, and continue
+       its numbering if it does.
+
+     Then carry on — build the behavior as normal, only its
+     *verification* moves.
 
 ## Red-green-refactor loop
 
@@ -66,9 +78,10 @@ Repeat per behavior identified above:
   section describing what was actually built/decided (especially anything
   that deviated from the original "What to build"), then move the file
   into `issues/done/`. The `issues` directory may not be in git source control, so you must move the file via `mv` rather than `git mv`.
-  Any criterion moved to `issues/manual-tests.md` is *removed* from the
-  issue, not left behind as an unchecked `- [ ]` — say so in the resolution
-  notes, naming the `MT-N` entry it became. An unchecked box on an issue in
+  Any criterion moved to a manual case (in the test plan or
+  `issues/manual-tests.md`) is *removed* from the issue, not left behind as
+  an unchecked `- [ ]` — say so in the resolution notes, naming the file
+  and the `MT-N` entry it became. An unchecked box on an issue in
   `issues/done/` is what `pj-issues validate` fails on, and it would be
   lying about the state of the work besides.
 - **Partial completion** (real-environment criteria per the first case

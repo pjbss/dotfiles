@@ -185,9 +185,12 @@ after five commits have been built on them.
 
 Acceptance criteria are only the things a test can prove. Anything that needs a
 person -- a visual check, driving a real terminal -- is kept out of the issues
-and collected in `issues/manual-tests.md`, because an issue holding a box no
-agent can tick never completes, and stalls the whole queue behind it. That file
-is the checklist for step 5. Then sanity-check the result:
+and collected in the test plan (`issues/test-plan.md`, drafted by
+`/pj-write-plan` for you to approve with the plan), because an issue holding a
+box no agent can tick never completes, and stalls the whole queue behind it.
+For planned work, the test plan is the checklist for step 5; issues planned
+without one still collect these in `issues/manual-tests.md`. Then sanity-check
+the result:
 
     $ pj-issues validate    # sections present, blockers real, no cycles
     $ pj-issues list        # what's ready, what's blocked on what

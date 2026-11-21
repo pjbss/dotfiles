@@ -84,9 +84,10 @@ and why). Don't leave this implicit.
 
 Then state what about this effort can only be confirmed by a person — a
 visual check, driving a real terminal session, anything no test can assert.
-Those go into `issues/manual-tests.md` when `pj-plan-issues` runs, never into
-an issue's acceptance criteria: an issue carrying a criterion no agent can
-check never completes unattended, and stalls the whole queue behind it.
+Those go into the plan's test plan (`pj-write-test-plan`), drafted alongside
+the plan, never into an issue's acceptance criteria: an issue carrying a
+criterion no agent can check never completes unattended, and stalls the
+whole queue behind it.
 
 ## Out of Scope
 

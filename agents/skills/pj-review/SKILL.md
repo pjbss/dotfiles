@@ -41,12 +41,15 @@ wrong precisely enough that the next pass can fix it.
    pipeline distinguishes "built and verified" from "marked done".
 
    Two related cases, checked here too. A criterion no automated test
-   *could* prove never belonged in the issue — it belonged in
-   `issues/manual-tests.md`, and leaving it as a criterion is what stalls an
-   unattended run. And when `## Resolution notes` says a criterion was moved
-   to that file, open the file and confirm the entry is really there:
-   otherwise "moved to manual tests" is a way to retire a criterion nobody
-   ever verified.
+   *could* prove never belonged in the issue — it belonged in the
+   manual-test file, and leaving it as a criterion is what stalls an
+   unattended run. If the issue has a `## Plan section`, that is the test
+   plan named by the `Test plan:` header of the plan it points at. For an
+   issue with no `## Plan section`, it is `issues/manual-tests.md`. When
+   `## Resolution notes` says a criterion was moved there, open that file
+   and confirm the `MT-n` entry is really there (and, in a test plan, that
+   the criterion's Traceability row names it): otherwise "moved to manual
+   tests" is a way to retire a criterion nobody ever verified.
 
 4. Then review the change on its own merits, in this order:
    - **Correctness**: what input or state makes this behave wrong? Prefer one
@@ -97,10 +100,10 @@ first, exact, and lowercase-hyphenated. Then:
 
 Use `changes-requested` for: a failing or unrun test suite, an unsupported
 acceptance criterion, an acceptance criterion no test could prove, a
-criterion the resolution notes claim was moved to `issues/manual-tests.md`
-that isn't there, a correctness bug, or a reversed PRD decision. Style
-preferences alone are not grounds for it — note them under Findings and
-approve.
+criterion the resolution notes claim was moved to a manual case (in the
+test plan or `issues/manual-tests.md`) that isn't there, a correctness bug,
+or a reversed PRD decision. Style preferences alone are not grounds for it
+— note them under Findings and approve.
 
 If there is nothing to say, say so briefly. A review that pads itself with
 generic advice trains the next reader to skim it.

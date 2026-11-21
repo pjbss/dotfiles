@@ -17,6 +17,7 @@ TEST_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$TEST_DIR/../.." && pwd)"
 
 . "$DOTFILES_HOME/test/assert.sh"
+. "$TEST_DIR/skill_doc.sh"
 
 skill_dir="$DOTFILES_HOME/agents/skills/pj-write-plan"
 skill="$skill_dir/SKILL.md"
@@ -27,16 +28,11 @@ if [ ! -f "$skill" ]; then
 	exit 1
 fi
 
-# The plan template: everything inside the ```markdown fence.
-template="$(awk '/^```markdown$/ { inside = 1; next } inside && /^```$/ { exit } inside' "$skill")"
-# The rest of the skill: frontmatter, process, self-checks, output.
-process="$(awk '/^```markdown$/ { inside = 1; next } inside && /^```$/ { inside = 0; next } !inside' "$skill")"
-
-flatten() { printf '%s' "$1" | tr '\n' ' ' | tr -s ' '; }
+template="$(skill_template "$skill")"
+process="$(skill_prose "$skill")"
 process_flat="$(flatten "$process")"
 
-# template_line TEXT -- line number of an exact line in the template, or empty.
-template_line() { printf '%s\n' "$template" | { grep -n -x -F "$1" || true; } | head -1 | cut -d: -f1; }
+template_line() { exact_line_number "$template" "$1"; }
 
 # --- frontmatter, and rendering ---
 
@@ -44,17 +40,7 @@ assert_eq "---" "$(sed -n 1p "$skill")" "the skill opens with frontmatter"
 assert_eq "name: pj-write-plan" "$(sed -n 2p "$skill")" "the frontmatter names the skill"
 assert_ok "the frontmatter has a description" grep -q -E '^description: .{20,}' "$skill"
 assert_eq "tags: [workflow, planning]" "$(sed -n 4p "$skill")" "the frontmatter tags it like the other planning skills"
-
-fixture_root="$(mktemp -d)"
-trap 'rm -rf "$fixture_root"' EXIT
-mkdir -p "$fixture_root/dotfiles/bin" "$fixture_root/dotfiles/agents/skills" "$fixture_root/home/.claude"
-cp "$DOTFILES_HOME/bin/dotfiles-sync-agents" "$fixture_root/dotfiles/bin/"
-cp -R "$skill_dir" "$fixture_root/dotfiles/agents/skills/"
-if HOME="$fixture_root/home" COPILOT_HOME="$fixture_root/home/.copilot" \
-	"$fixture_root/dotfiles/bin/dotfiles-sync-agents" >/dev/null 2>&1; then rc=0; else rc=$?; fi
-assert_exit_code 0 "$rc" "dotfiles-sync-agents renders the skill"
-assert_ok "the skill is rendered for Claude Code" test -f "$fixture_root/home/.claude/skills/pj-write-plan/SKILL.md"
-assert_ok "the skill is rendered for Copilot CLI" test -f "$fixture_root/home/.copilot/skills/pj-write-plan/SKILL.md"
+assert_ok "dotfiles-sync-agents renders the skill for Claude Code and Copilot CLI" skill_renders "$skill_dir"
 
 # --- input and approval gate ---
 
@@ -65,6 +51,19 @@ assert_contains "$process_flat" '`Status: approved (<today>)` only after the hum
 	"the process approves the plan only on explicit human approval"
 assert_contains "$process_flat" 'Editing an approved plan sets it back to `Status: draft`' \
 	"the process returns an edited approved plan to draft"
+
+# --- drafting the test plan ---
+
+selfcheck_line="$({ grep -n -F 'Run the self-checks below' "$skill" || true; } | head -1 | cut -d: -f1)"
+draft_line="$({ grep -n -F 'draft the test plan with `pj-write-test-plan`' "$skill" || true; } | head -1 | cut -d: -f1)"
+present_line="$({ grep -n -F 'Present the plan and its draft test plan' "$skill" || true; } | head -1 | cut -d: -f1)"
+assert_ok "the process drafts the test plan with pj-write-test-plan after the self-checks" \
+	test "${draft_line:-0}" -gt "${selfcheck_line:-0}"
+assert_ok "... and presents the plan and test plan together for approval" \
+	test "${present_line:-0}" -gt "${draft_line:-999999}"
+
+assert_contains "$process_flat" "update each layer's \`Manual:\` line from the test plan's \`MT-n\` cases" \
+	"the plan's Manual: lines are updated from the drafted test plan"
 
 # --- naming ---
 

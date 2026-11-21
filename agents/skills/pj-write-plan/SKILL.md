@@ -40,8 +40,16 @@ the specification, and `pj-tdd` writes the code.
 
 5. Run the self-checks below and fix what they find.
 
-6. Present the plan for approval: summarize the Stack table, and name any
-   layer flagged as oversized. Change the status line to
+6. Last, draft the test plan with `pj-write-test-plan` (its draft mode), at
+   the path the `Test plan:` header names. It gives every acceptance
+   criterion a planned automated test or a manual case. Then update each
+   layer's `Manual:` line from the test plan's `MT-n` cases, and give any
+   criterion it reported as a gap a test assertion in its layer.
+
+7. Present the plan and its draft test plan together for approval, so the
+   human approves the design and the manual surface in one go: summarize
+   the Stack table, name any layer flagged as oversized, and list the
+   manual cases. Change the plan's status line to
    `Status: approved (<today>)` only after the human explicitly approves in
    conversation. Anything short of that — silence, "looks good so far", a
    request for changes — leaves it `Status: draft`.
@@ -157,5 +165,6 @@ Before presenting the plan, check each of these and fix what fails:
 ## Output
 
 `issues/plan.md` or `issues/plan-<name>.md`, following the template above,
-marked approved only if the human approved it. Nothing else is created or
-modified. Suggest `pj-plan-issues` as the next step.
+marked approved only if the human approved it, and the draft test plan its
+`Test plan:` header names (written by `pj-write-test-plan`). Nothing else
+is created or modified. Suggest `pj-plan-issues` as the next step.
