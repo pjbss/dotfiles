@@ -81,6 +81,7 @@ issue_file="issues/$issue_name"
 # environment. Kept outside the repo so it never becomes part of the work.
 if [ -n "${STUB_ENV_LOG:-}" ]; then
 	case "$prompt" in
+		*"pj-review-quality skill"*) call=quality ;;
 		*"pj-review skill"*) call=review ;;
 		*"pj-commit skill"*) call=commit ;;
 		*"requested changes to your"*) call=remediate ;;
@@ -97,13 +98,55 @@ if [ -n "${STUB_PROMPT_LOG:-}" ]; then
 	printf '%s\n' "$prompt" >> "$STUB_PROMPT_LOG"
 fi
 
+# next_verdict KIND LIST -- the Nth word of LIST on this run's Nth KIND
+# review, and the last word once the list runs out, so a test can script how
+# successive attempts go. Counted in the repo's git dir: outside the work, and
+# fresh for every test's new repo.
+next_verdict() {
+	count_file="$(git rev-parse --absolute-git-dir)/stub-$1.count"
+	n=$(($(cat "$count_file" 2>/dev/null || echo 0) + 1))
+	echo "$n" > "$count_file"
+	set -- $2
+	[ "$n" -le $# ] || n=$#
+	eval "printf '%s' \"\${$n}\""
+}
+
 case "$prompt" in
+	*"pj-review-quality skill"*)
+		verdict="$(next_verdict quality "${STUB_QUALITY_VERDICTS:-approved}")"
+		# nofile never writes the verdict; firstonly writes it on the first
+		# quality review only, so a later attempt finds just the stale one.
+		quality_call="$(cat "$(git rev-parse --absolute-git-dir)/stub-quality.count")"
+		case "${STUB_QUALITY_MODE:-}" in
+			nofile) write_quality="" ;;
+			firstonly) write_quality="$([ "$quality_call" -eq 1 ] && echo 1 || true)" ;;
+			*) write_quality=1 ;;
+		esac
+		if [ -n "$write_quality" ]; then
+			mkdir -p issues/reviews
+			cat > "issues/reviews/${issue_name%.md}.quality.md" <<VERDICT
+Verdict: $verdict
+
+## Reviewed
+
+\`issues/$issue_name\`
+
+## Findings
+
+1. **[blocking] STUB_QUALITY_FINDING_LABEL** -- \`src/stub.sh:7\`
+   STUB_QUALITY_FINDING_DETAIL
+VERDICT
+		fi
+		say_stub "stub: quality-reviewed $issue_name -> $verdict"
+		;;
+
 	*"pj-review skill"*)
+		verdict="$(next_verdict spec "${STUB_VERDICTS:-${STUB_VERDICT:-approved}}")"
 		mkdir -p issues/reviews
 		# Both sections, in the shape pj-review's SKILL.md specifies, so the
 		# tests can tell which of them the loop puts on the console.
 		cat > "issues/reviews/${issue_name%.md}.md" <<VERDICT
-Verdict: ${STUB_VERDICT:-approved}
+Verdict: $verdict
 
 ## Reviewed
 
@@ -114,7 +157,7 @@ Verdict: ${STUB_VERDICT:-approved}
 1. **STUB_FINDING_LABEL** -- \`src/stub.sh:41\`
    STUB_FINDING_DETAIL
 VERDICT
-		say_stub "stub: reviewed $issue_name -> ${STUB_VERDICT:-approved}"
+		say_stub "stub: reviewed $issue_name -> $verdict"
 		;;
 
 	*"pj-commit skill"*)
@@ -128,6 +171,7 @@ Issue: issues/$issue_name"
 		;;
 
 	*"requested changes to your"*)
+		[ -z "${STUB_REMEDIATE_LOG:-}" ] || printf '%s\n' "$prompt" >> "$STUB_REMEDIATE_LOG"
 		echo "remediated" >> "stub-work-${issue_name%.md}.txt"
 		say_stub "stub: remediated $issue_name"
 		;;
@@ -410,7 +454,8 @@ repo="$(make_repo rejected 2)"
 STUB_VERDICT=changes-requested run_loop "$repo"
 unset STUB_VERDICT
 assert_exit_code 1 "$rc" "a run whose review keeps requesting changes exits non-zero"
-assert_contains "$out" "one remediation pass" "the loop attempts exactly one remediation"
+assert_contains "$out" "remediation pass 2 of 2" "the loop attempts two remediation passes"
+assert_not_contains "$out" "remediation pass 3" "and no third"
 assert_contains "$out" "stopping for a human" "it stops rather than looping on remediation"
 assert_ok "the unresolved issue is moved back out of done/ so a later run doesn't skip it" \
 	test -f "$repo/issues/001-slice.md"
@@ -440,6 +485,118 @@ run_loop "$repo" --no-review
 assert_exit_code 0 "$rc" "--no-review exits 0"
 assert_not_ok "--no-review writes no verdict file" test -d "$repo/issues/reviews"
 assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "--no-review still commits the work"
+env_log="$fixture_root/noreview-env.log"
+repo="$(make_repo noreview-lenses 1)"
+STUB_ENV_LOG="$env_log" run_loop "$repo" --no-review
+assert_not_contains "$(cat "$env_log")" "review " "--no-review never invokes the spec review"
+assert_not_contains "$(cat "$env_log")" "quality " "--no-review never invokes the quality review"
+
+# === two review lenses ======================================================
+
+# count_calls LOG CALL -- how many invocations of one kind the stub logged.
+count_calls() {
+	grep -c "^$2 " "$1" || true
+}
+
+repo="$(make_repo lenses-approve 1)"
+env_log="$fixture_root/lenses-approve-env.log"
+STUB_ENV_LOG="$env_log" run_loop "$repo"
+assert_exit_code 0 "$rc" "both lenses approving lets the issue through"
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "the approved issue is committed"
+assert_eq "1" "$(count_calls "$env_log" review)" "the spec review runs once, in its own invocation"
+assert_eq "1" "$(count_calls "$env_log" quality)" "the quality review runs once, in its own invocation"
+assert_ok "the quality verdict goes to its own file" test -f "$repo/issues/reviews/001-slice.quality.md"
+assert_ok "the spec verdict keeps its file" test -f "$repo/issues/reviews/001-slice.md"
+assert_ok "the quality reviewer's own lines are labeled qual" \
+	grep -q -E 'qual +.*stub: quality-reviewed 001-slice.md' <<<"$out"
+
+repo="$(make_repo lenses-one-pass 1)"
+env_log="$fixture_root/lenses-one-pass-env.log"
+remediate_log="$fixture_root/lenses-one-pass-remediate.log"
+STUB_ENV_LOG="$env_log" STUB_REMEDIATE_LOG="$remediate_log" \
+	STUB_QUALITY_VERDICTS="changes-requested approved" run_loop "$repo"
+assert_exit_code 0 "$rc" "a quality objection fixed in one pass lets the issue through"
+assert_eq "1" "$(count_calls "$env_log" remediate)" "exactly one remediation pass ran"
+assert_contains "$out" "remediation pass 1 of 2" "the console counts the pass"
+assert_not_contains "$out" "remediation pass 2" "and there was no second"
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "the issue is committed after the pass"
+assert_contains "$(cat "$remediate_log")" "issues/reviews/001-slice.md" "the remediation prompt names the spec verdict file"
+assert_contains "$(cat "$remediate_log")" "issues/reviews/001-slice.quality.md" "and the quality verdict file"
+assert_contains "$(cat "$remediate_log")" "[blocking]" "it tells the fixer which findings to fix"
+assert_contains "$(cat "$remediate_log")" "[pre-existing]" "and which to leave alone"
+assert_eq "2" "$(count_calls "$env_log" review)" "both lenses re-run after the pass: spec"
+assert_eq "2" "$(count_calls "$env_log" quality)" "both lenses re-run after the pass: quality"
+
+repo="$(make_repo lenses-two-passes 1)"
+env_log="$fixture_root/lenses-two-passes-env.log"
+STUB_ENV_LOG="$env_log" STUB_QUALITY_VERDICTS="changes-requested changes-requested approved" run_loop "$repo"
+assert_exit_code 0 "$rc" "a quality objection fixed on the second pass lets the issue through"
+assert_eq "2" "$(count_calls "$env_log" remediate)" "two remediation passes ran"
+assert_contains "$out" "remediation pass 2 of 2" "the console counts both passes"
+assert_eq "2" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "the issue is committed after the second pass"
+
+repo="$(make_repo lenses-exhausted 1)"
+env_log="$fixture_root/lenses-exhausted-env.log"
+STUB_ENV_LOG="$env_log" STUB_QUALITY_VERDICTS="changes-requested" run_loop "$repo"
+assert_exit_code 1 "$rc" "changes requested on all three attempts stops the run"
+assert_eq "2" "$(count_calls "$env_log" remediate)" "after exactly two remediation passes"
+assert_contains "$out" "after 2 remediation passes" "the console says how many passes ran"
+assert_ok "the unresolved issue is back in issues/" test -f "$repo/issues/001-slice.md"
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "nothing was committed"
+assert_ok "the work is left staged" bash -c "cd '$repo' && ! git diff --cached --quiet"
+
+repo="$(make_repo lenses-no-quality-file 1)"
+STUB_QUALITY_MODE=nofile run_loop "$repo"
+assert_exit_code 1 "$rc" "a quality review that writes no verdict file stops the run"
+assert_contains "$out" "001-slice.quality.md" "the stop names the missing quality verdict file"
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "nothing is committed without both verdicts"
+
+# A verdict file left over from an earlier attempt must never stand in for a
+# review that didn't happen: the remediated code would ship unreviewed.
+repo="$(make_repo lenses-stale-quality 1)"
+STUB_QUALITY_MODE=firstonly STUB_VERDICTS="changes-requested approved" run_loop "$repo"
+assert_exit_code 1 "$rc" "a quality verdict left from an earlier attempt is never reused"
+assert_contains "$out" "001-slice.quality.md" "the stop names the missing quality verdict"
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "the remediated work isn't committed on a stale verdict"
+
+repo="$(make_repo lenses-garbled 1)"
+STUB_QUALITY_VERDICTS="maybe" run_loop "$repo"
+assert_exit_code 1 "$rc" "an unrecognized quality verdict stops the run"
+assert_contains "$out" "unrecognized verdict line 'Verdict: maybe'" "the stop quotes the line it couldn't read"
+assert_eq "1" "$(git -C "$repo" log --oneline | wc -l | tr -d ' ')" "nothing is committed on an unreadable verdict"
+
+repo="$(make_repo lenses-findings 1)"
+STUB_VERDICTS="changes-requested approved" STUB_QUALITY_VERDICTS="changes-requested approved" run_loop "$repo"
+assert_exit_code 0 "$rc" "both lenses objecting once, then approving, lets the issue through"
+assert_ok "the spec findings are printed under rev" grep -q -E 'rev +↳ .*STUB_FINDING_LABEL' <<<"$out"
+assert_ok "the quality findings are printed under qual" grep -q -E 'qual +↳ .*STUB_QUALITY_FINDING_LABEL' <<<"$out"
+
+# The docs describe what the loop now does.
+readme_flat="$(tr '\n' ' ' < "$DOTFILES_HOME/README" | tr -s ' ')"
+header_flat="$(sed -n '1,/^set -eu/p' "$RUN_ISSUES" | tr '\n' ' ' | tr -s ' ')"
+assert_contains "$readme_flat" '`pj-review-quality` for how the code reads' "the README describes the second review lens"
+assert_contains "$readme_flat" "up to two remediation passes" "the README describes two remediation passes"
+assert_contains "$header_flat" "pj-review-quality for how the code reads" "the script header describes the second review lens"
+assert_contains "$header_flat" "up to two remediation passes" "the script header describes two remediation passes"
+
+# phase_color, lifted out of the script with the palette forced on: the
+# console colors every qual line with it.
+phase_color_of() {
+	local fn
+	fn="$(sed -n '/^phase_color() {/,/^}/p' "$RUN_ISSUES")"
+	bash -c '
+		. "$1/sandbox/lib/color.sh"
+		sandbox_color_supported() { return 0; }
+		sandbox_color_init
+		eval "$2"
+		phase_color "$3"
+	' _ "$DOTFILES_HOME" "$fn" "$1"
+}
+qual_color="$(phase_color_of qual)"
+assert_eq "$(printf '\033[1m\033[35m')" "$qual_color" "qual is bold magenta in phase_color"
+for label in tdd rev fix gate git loop; do
+	assert_ok "qual's color differs from $label's" test "$qual_color" != "$(phase_color_of "$label")"
+done
 
 # === the project is the cwd, not the repo root ==============================
 
@@ -487,7 +644,7 @@ env_log="$fixture_root/everycall-env.log"
 prompt_log="$fixture_root/everycall-prompts.log"
 STUB_ENV_LOG="$env_log" STUB_PROMPT_LOG="$prompt_log" STUB_VERDICT=changes-requested \
 	PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
-for call in tdd review remediate; do
+for call in tdd review quality remediate; do
 	assert_contains "$(cat "$env_log")" "$call PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project" \
 		"the $call invocation gets PJ_TEST_CMD and PJ_PROJECT_ROOT, and no PJ_TEST_DIR"
 done

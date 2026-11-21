@@ -2,8 +2,8 @@
 # pj-run-issues
 #
 # Drains the ready queue in `issues/`: for each unblocked issue, implement it
-# test-first, run the suite, review it in a fresh context, and commit it only
-# once that review approves. Stops on the first thing that doesn't go cleanly,
+# test-first, run the suite, review it through two lenses in fresh contexts,
+# and commit it only once both approve. Stops on the first thing that doesn't go cleanly,
 # rather than pressing on and burying the failure under later work.
 #
 # One commit per issue is the point of the whole arrangement -- it's what makes
@@ -23,12 +23,18 @@
 # implementing agent, so "exactly one commit per issue" doesn't rest on an
 # agent having followed an instruction.
 #
-# The review runs as a separate `claude -p` process, not a subagent of the
+# Each review runs as a separate `claude -p` process, not a subagent of the
 # implementing session. A reviewer that shares context with the author has
-# already been told why every decision was right, and reliably agrees. Its
-# findings are printed, not just its verdict: a review whose substance lives
-# only in a file nobody is watching is indistinguishable from one that never
-# ran.
+# already been told why every decision was right, and reliably agrees. There
+# are two lenses, in two processes: pj-review for the spec and correctness,
+# then pj-review-quality for how the code reads. Their findings are printed,
+# not just their verdicts: a review whose substance lives only in a file
+# nobody is watching is indistinguishable from one that never ran.
+#
+# A `changes-requested` from either lens gets up to two remediation passes,
+# each followed by the test gate and both lenses again. Still
+# changes-requested after the second, the run stops for a human with the work
+# left staged.
 #
 # Usage: pj-run-issues [--max-issues N] [--test-cmd CMD] [--no-review]
 #                      [--dry-run] [--plain] [--force] [--help|-h]
@@ -37,7 +43,7 @@
 #   --test-cmd CMD  Command that gates the run, run with `sh -c` from the
 #                   project root (default: .pj/test, else discovered, see
 #                   below).
-#   --no-review     Skip the review pass. For a first smoke test only.
+#   --no-review     Skip both review lenses. For a first smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
 #   --plain         Print each agent's final message instead of its live event
@@ -46,10 +52,11 @@
 #                   don't want this.
 #
 # Every line of output is labeled with the agent that produced it -- `tdd`
-# while pj-tdd implements, `rev` while the reviewer reads, `fix` during a
-# remediation pass, `gate` for the test command, `git` while pj-commit writes the
-# commit, `loop` for the loop's own decisions -- and colored to match. Three agents and their subagents write to
-# one terminal over a run of hours; an unlabeled stream of that is not
+# while pj-tdd implements, `rev` and `qual` while the two reviewers read,
+# `fix` during a remediation pass, `gate` for the test command, `git` while
+# pj-commit writes the commit, `loop` for the loop's own decisions -- and
+# colored to match. Several agents and their subagents write to one terminal
+# over a run of hours; an unlabeled stream of that is not
 # something anyone can audit afterwards, which defeats the point of watching an
 # unattended run at all.
 #
@@ -161,6 +168,7 @@ phase_color() {
 	case "$1" in
 		tdd) printf '%s' "$C_GREEN" ;;
 		rev) printf '%s' "$C_MAGENTA" ;;
+		qual) printf '%s%s' "$C_BOLD" "$C_MAGENTA" ;;
 		fix) printf '%s' "$C_YELLOW" ;;
 		gate) printf '%s' "$C_BLUE" ;;
 		git) printf '%s' "$C_BOLD" ;;
@@ -203,7 +211,7 @@ say_sub() {
 		"$(date +%H:%M:%S)" "$(phase_color "$1")" "$1" "$C_RESET" "$GLYPH_SUB" "$2"
 }
 
-# say_verdict VERDICT_FILE WANT
+# say_verdict VERDICT_FILE WANT LABEL
 #
 # Puts the review's own words on the console. The loop used to read only the
 # first line of this file and print "changes requested", leaving the findings --
@@ -228,8 +236,61 @@ say_verdict() {
 		NF == 0 { next }
 		{ print }
 	' "$1" | while IFS= read -r line; do
-		say_sub rev "$line"
+		say_sub "$3" "$line"
 	done
+}
+
+# run_lens LABEL SKILL VERDICT_FILE LOG
+#
+# Runs one review lens in its own `claude -p` process, puts its verdict and
+# findings on the console under LABEL, and sets $lens_verdict to `approved` or
+# `changes-requested`. Stops the run on anything else: a reviewer that crashed,
+# wrote no file, or wrote a first line this loop can't parse has not reviewed
+# anything, and committing on its silence would be committing unreviewed work.
+# Sets a global rather than echoing, because it has to be able to exit.
+run_lens() {
+	lens_label="$1"
+	lens_skill="$2"
+	lens_file="$3"
+
+	run_claude "Use the $lens_skill skill to review the implementation of
+issues/done/$issue_name. It is not committed: the work under review is the
+staged change, which 'git diff --cached' shows in full, including new files.
+
+Write your verdict to $lens_file. Review only; do not change any code, and
+do not commit -- this loop commits once both reviews approve." \
+		"$4" "$lens_label" || {
+		say_phase "$lens_label" "claude exited non-zero during $lens_skill on $issue_name -- stopping"
+		log "stopped: claude failed in $lens_skill on $issue_name"
+		exit 1
+	}
+
+	if [ ! -f "$lens_file" ]; then
+		say_phase "$lens_label" "$lens_skill produced no verdict file ($lens_file) -- stopping"
+		log "stopped: no $lens_file for $issue_name"
+		exit 1
+	fi
+
+	lens_line="$(head -1 "$lens_file")"
+	log "$lens_skill verdict for $issue_name: $lens_line"
+
+	case "$lens_line" in
+		"Verdict: approved")
+			lens_verdict=approved
+			say_ok "$lens_label" "approved"
+			say_verdict "$lens_file" reviewed "$lens_label"
+			;;
+		"Verdict: changes-requested")
+			lens_verdict=changes-requested
+			say_bad "$lens_label" "changes requested"
+			say_verdict "$lens_file" findings "$lens_label"
+			;;
+		*)
+			say_phase "$lens_label" "unrecognized verdict line '$lens_line' in $lens_file -- stopping"
+			log "stopped: unrecognized verdict in $lens_file"
+			exit 1
+			;;
+	esac
 }
 
 max_issues=""
@@ -612,94 +673,77 @@ passes. Do not start any other issue. Do not push." "$issue_log" tdd || {
 	# the branch, so a later run built a second commit for the same issue.
 	# Nothing to back out if nothing was committed.
 
+	# Two lenses, each in its own process: pj-review for the spec and
+	# correctness, pj-review-quality for how the code reads. The issue goes
+	# through only when both approve. Up to two remediation passes, each
+	# followed by the gate and both lenses again: a stricter review needs room
+	# to converge, and a second pass fixes what the first one's fix missed --
+	# but a third would be the loop arguing with itself, so it stops there.
 	verdict_file="issues/reviews/$issue_slug.md"
-	attempt=1
+	quality_file="issues/reviews/$issue_slug.quality.md"
+	max_remediations=2
+	remediations=0
 
 	while [ -n "$review" ]; do
-		say_phase rev "reviewing $issue_name (attempt $attempt)"
-		rm -f "$verdict_file"
+		say_phase rev "reviewing $issue_name (attempt $((remediations + 1)))"
+		rm -f "$verdict_file" "$quality_file"
 
-		run_claude "Use the pj-review skill to review the implementation of
-issues/done/$issue_name. It is not committed: the work under review is the
-staged change, which 'git diff --cached' shows in full, including new files.
+		run_lens rev pj-review "$verdict_file" "$run_dir/$issue_slug.review.log"
+		spec_verdict="$lens_verdict"
+		run_lens qual pj-review-quality "$quality_file" "$run_dir/$issue_slug.quality.log"
 
-Write your verdict to $verdict_file. Review only; do not change any code, and
-do not commit -- this loop commits once you approve." \
-			"$run_dir/$issue_slug.review.log" rev || {
-			say_phase rev "claude exited non-zero while reviewing $issue_name -- stopping"
-			log "stopped: claude failed reviewing $issue_name"
-			exit 1
-		}
+		if [ "$spec_verdict" = approved ] && [ "$lens_verdict" = approved ]; then
+			if [ "$remediations" -gt 0 ]; then
+				say_ok rev "both reviews approve after $remediations remediation pass(es)"
+			fi
+			break
+		fi
 
-		if [ ! -f "$verdict_file" ]; then
-			say_phase rev "the review produced no verdict file -- stopping"
-			log "stopped: no verdict file for $issue_name"
+		if [ "$remediations" -ge "$max_remediations" ]; then
+			say_phase rev "still changes-requested after $remediations remediation passes -- stopping for a human"
+			log "stopped: $issue_name unresolved after $remediations remediation passes"
+			# Back out of done/ so the queue reflects reality: this issue is
+			# not finished, and a later run must not skip it. The work itself
+			# stays staged in the tree, unreviewed and uncommitted, which is
+			# exactly what it is -- there is no commit to disown, because none
+			# was ever made.
+			mkdir -p issues
+			mv "issues/done/$issue_name" "issues/$issue_name"
+			say_phase rev "the work is left staged and uncommitted in the working tree; $verdict_file and $quality_file say what is wrong"
 			exit 1
 		fi
 
-		verdict="$(head -1 "$verdict_file")"
-		log "review verdict for $issue_name: $verdict"
+		remediations=$((remediations + 1))
+		say_phase fix "remediation pass $remediations of $max_remediations"
+		log "remediating $issue_name (pass $remediations)"
 
-		case "$verdict" in
-			"Verdict: approved")
-				say_ok rev "approved"
-				say_verdict "$verdict_file" reviewed
-				break
-				;;
-			"Verdict: changes-requested")
-				say_bad rev "changes requested"
-				say_verdict "$verdict_file" findings
-
-				if [ "$attempt" -ge 2 ]; then
-					say_phase rev "still changes-requested after a remediation pass -- stopping for a human"
-					log "stopped: $issue_name unresolved after remediation"
-					# Back out of done/ so the queue reflects reality: this
-					# issue is not finished, and a later run must not skip it.
-					# The work itself stays staged in the tree, unreviewed and
-					# uncommitted, which is exactly what it is -- there is no
-					# commit to disown, because none was ever made.
-					mkdir -p issues
-					mv "issues/done/$issue_name" "issues/$issue_name"
-					say_phase rev "the work is left staged and uncommitted in the working tree; $verdict_file says what is wrong"
-					exit 1
-				fi
-
-				say_phase rev "one remediation pass"
-				log "remediating $issue_name"
-
-				run_claude "The review in $verdict_file requested changes to your
+		run_claude "The reviews in $verdict_file and $quality_file requested changes to your
 implementation of issues/done/$issue_name, which is staged but not committed.
-Read the review, address every finding, and keep the test suite green.
+Read both. Fix every [blocking] finding. Fix a [note] only where it is cheap
+and clearly right. Leave [pre-existing] findings alone: they aren't this
+change's to fix, and changing that code would be unrequested scope, which the
+next review blocks on. Keep the test suite green.
 
-Do not commit and do not push: this loop commits once the review passes." \
-					"$run_dir/$issue_slug.remediate.log" fix || {
-					say_phase fix "claude exited non-zero while remediating $issue_name -- stopping"
-					log "stopped: claude failed remediating $issue_name"
-					exit 1
-				}
+Do not commit and do not push: this loop commits once both reviews pass." \
+			"$run_dir/$issue_slug.remediate.log" fix || {
+			say_phase fix "claude exited non-zero while remediating $issue_name -- stopping"
+			log "stopped: claude failed remediating $issue_name"
+			exit 1
+		}
 
-				if [ "$(git rev-parse HEAD)" != "$commit_before" ]; then
-					say_phase fix "the remediation committed despite the instruction not to -- rewinding"
-					log "rewound a premature commit while remediating $issue_name"
-					git reset --soft "$commit_before" >/dev/null
-				fi
+		if [ "$(git rev-parse HEAD)" != "$commit_before" ]; then
+			say_phase fix "the remediation committed despite the instruction not to -- rewinding"
+			log "rewound a premature commit while remediating $issue_name"
+			git reset --soft "$commit_before" >/dev/null
+		fi
 
-				git add -A
+		git add -A
 
-				if ! make_test_gate "$issue_log"; then
-					say_phase gate "'$test_cmd' is failing after remediation -- stopping"
-					log "stopped: '$test_cmd' failed after remediating $issue_name"
-					exit 1
-				fi
-
-				attempt=$((attempt + 1))
-				;;
-			*)
-				say_phase rev "unrecognized verdict line '$verdict' in $verdict_file -- stopping"
-				log "stopped: unrecognized verdict for $issue_name"
-				exit 1
-				;;
-		esac
+		if ! make_test_gate "$issue_log"; then
+			say_phase gate "'$test_cmd' is failing after remediation -- stopping"
+			log "stopped: '$test_cmd' failed after remediating $issue_name"
+			exit 1
+		fi
 	done
 
 	# --- the commit, once nothing objects to it ----------------------------

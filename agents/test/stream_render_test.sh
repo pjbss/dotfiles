@@ -161,6 +161,13 @@ assert_not_contains "$(cat "$logfile")" "$esc" \
 render --label tdd
 assert_not_contains "$out" "$esc" "without --color the terminal stream is plain too"
 
+# The quality reviewer gets a label color of its own, a bolder sibling of the
+# spec reviewer's magenta, so the two lenses read apart in one stream.
+render --label qual --color
+assert_contains "$out" "$esc[1;35mqual" "the qual label is bold magenta"
+render --label rev --color
+assert_not_contains "$out" "$esc[1;35m" "rev keeps its own plain magenta"
+
 # A second phase appends rather than truncating: three phases share one issue's
 # log, and a review that erased the implementation's lines would be worse than
 # no log at all.

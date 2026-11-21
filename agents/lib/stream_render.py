@@ -56,6 +56,7 @@ except (AttributeError, ValueError):
 LABEL_COLORS = {
     "tdd": "\033[32m",      # green
     "rev": "\033[35m",      # magenta
+    "qual": "\033[1;35m",   # bold magenta: the second review lens
     "fix": "\033[33m",      # yellow
     "gate": "\033[34m",     # blue
     "git": "\033[1m",       # bold
