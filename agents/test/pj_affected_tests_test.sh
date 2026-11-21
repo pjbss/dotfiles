@@ -227,4 +227,18 @@ assert_eq "" "$ran" "--help runs no suite"
 help_output="$("$DOTFILES_HOME/bin/pj-help")"
 assert_contains "$help_output" "pj-affected-tests" "pj-help lists pj-affected-tests"
 
+# --- the sweep, with a test-less Makefile sorting last ---------------------
+
+# Discovery runs under /bin/sh with errexit; a non-suite Makefile that happens
+# to sort last (docs, website, tools) once made the whole sweep exit 1 before
+# printing anything.
+repo="$(new_repo lastless api)"
+mkdir -p "$repo/zdocs"
+printf 'html:\n\t@true\n' > "$repo/zdocs/Makefile"
+git -C "$repo" add -A
+git -C "$repo" commit -qm docs
+PJ_TEST_SCOPE=all run_affected "$repo"
+assert_exit_code 0 "$rc" "the sweep passes when the last Makefile found has no test target"
+assert_eq "api" "$ran" "and still runs every real suite"
+
 assert_report

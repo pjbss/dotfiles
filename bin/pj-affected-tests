@@ -30,7 +30,8 @@
 # root, ignoring what changed -- the end-of-run sweep.
 #
 # Vendored directories (.git, node_modules, venv, .venv, vendor, target, build,
-# dist) are never searched for suites, the same list pj-run-issues prunes.
+# dist) are never searched for suites: agents/lib/gate.sh's list, the same one
+# pj-run-issues uses to discover its gate.
 
 set -eu
 
@@ -41,6 +42,7 @@ DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 . "$DOTFILES_HOME/sandbox/lib/color.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
+. "$DOTFILES_HOME/agents/lib/gate.sh"
 
 fail() {
 	printf "%spj-affected-tests:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
@@ -68,33 +70,12 @@ done
 root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail "must be run from inside a git repository"
 cd "$root"
 
-# True when DIR holds a Makefile declaring a `test` target.
-has_test_target() {
-	[ -f "$1/Makefile" ] && grep -q '^test:' "$1/Makefile"
-}
-
-# The directories that are full of vendored Makefiles nobody means -- the same
-# list pj-run-issues prunes when it discovers a gate. Neither discovery here
-# looks inside them, so a repo full of dependencies doesn't turn the gate into
-# a crawl or into running someone else's suite.
-PRUNED=".git node_modules venv .venv vendor target build dist"
-
-# True when any component of DIR is one of $PRUNED.
-is_pruned() {
-	for name in $PRUNED; do
-		case "/$1/" in
-			*/"$name"/*) return 0 ;;
-		esac
-	done
-	return 1
-}
-
 # suite_for PATH -- the nearest directory at or above PATH's own, up to the
 # repository root, that has a suite; prints nothing when none does.
 suite_for() {
 	dir="$(dirname "$1")"
 	while :; do
-		if ! is_pruned "$dir" && has_test_target "$dir"; then
+		if ! pj_gate_is_pruned "$dir" && pj_gate_has_test_target "$dir"; then
 			printf '%s\n' "$dir"
 			return
 		fi
@@ -103,22 +84,8 @@ suite_for() {
 	done
 }
 
-# every_suite -- every suite below the root, pruned directories aside.
-every_suite() {
-	set --
-	for name in $PRUNED; do
-		set -- "$@" -o -name "$name"
-	done
-	shift # the leading -o
-
-	find . \( "$@" \) -prune -o -name Makefile -print 2>/dev/null | sed 's|/Makefile$||; s|^\./||' |
-		while IFS= read -r dir; do
-			has_test_target "$dir" && printf '%s\n' "$dir"
-		done
-}
-
 if [ "${PJ_TEST_SCOPE:-}" = "all" ]; then
-	suites="$(every_suite | sort)"
+	suites="$(pj_gate_find_suites)"
 else
 	if [ -n "$since" ]; then
 		# Checked first, because a mistyped REF would otherwise read as a
@@ -148,7 +115,7 @@ else
 fi
 
 if [ -z "$suites" ]; then
-	if has_test_target .; then
+	if pj_gate_has_test_target .; then
 		suites="."
 	else
 		echo "pj-affected-tests: no suite covers the change -- nothing to run under $root"

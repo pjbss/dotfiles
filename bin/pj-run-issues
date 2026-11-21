@@ -126,6 +126,7 @@ BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
 
 . "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/agents/lib/gate.sh"
 . "$DOTFILES_HOME/sandbox/lib/help.sh"
 
 # Declared in one place so a terminal that mangles them is a three-line fix
@@ -342,69 +343,11 @@ command -v claude >/dev/null 2>&1 || fail "claude is not on PATH"
 
 # --- the test gate ----------------------------------------------------------
 
-# shell_word STRING -- STRING as one word for `sh -c`: bare when it is only
-# characters no shell treats specially, so the common case reads naturally, and
-# single-quoted otherwise, with each embedded ' closed, escaped and reopened.
-shell_word() {
-	case "$1" in
-		*[!A-Za-z0-9._/+=:@%-]*|'')
-			printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
-		*) printf '%s' "$1" ;;
-	esac
-}
-
-# True when DIR holds a Makefile declaring a `test` target.
-has_test_target() {
-	[ -f "$1/Makefile" ] && grep -q '^test:' "$1/Makefile"
-}
-
-if [ -n "$test_cmd" ]; then
-	: # named explicitly -- run as given, since only running it can check it
-elif [ -e .pj/test ]; then
-	# Refused rather than skipped: falling through to `make test` would gate
-	# the run on a suite the project deliberately named something else over.
-	[ -x .pj/test ] || fail ".pj/test exists but isn't executable -- run 'chmod +x .pj/test' (and commit it) so it can gate this run. It is not skipped in favor of 'make test', since that would gate the run on a suite this project didn't choose."
-	test_cmd="./.pj/test"
-elif has_test_target .; then
-	test_cmd="make test"
-else
-	# Depth-limited, and pruning the directories that are full of vendored
-	# Makefiles nobody means, so that on a large monorepo this stays a
-	# moment's work and the candidates it reports back are all plausible
-	# answers to "which suite gates this run?".
-	candidates="$(
-		find . -maxdepth 4 \
-			\( -name .git -o -name node_modules -o -name venv -o -name .venv \
-			   -o -name vendor -o -name target -o -name build -o -name dist \) -prune -o \
-			-name Makefile -print 2>/dev/null | sed 's|/Makefile$||' | sort
-	)"
-
-	discovered=""
-	found=0
-	while IFS= read -r candidate; do
-		[ -n "$candidate" ] || continue
-		has_test_target "$candidate" || continue
-		discovered="$discovered${candidate#./}
-"
-		found=$((found + 1))
-	done <<-CANDIDATES
-		$candidates
-	CANDIDATES
-
-	if [ "$found" -eq 0 ]; then
-		fail "no .pj/test and no 'make test' target under $project_root, so there is nothing to gate this run on. Commit an executable .pj/test at the project root to say what the gate is, or pass --test-cmd CMD to name it for this one run."
-	fi
-
-	if [ "$found" -gt 1 ]; then
-		fail "several 'make test' targets under $project_root -- commit an executable .pj/test at the project root that runs the one that gates this work, or pass --test-cmd to name it for this one run:
-$(printf '%s' "$discovered" | sed 's|^|  |')"
-	fi
-
-	# Quoted, because this string is run by `sh -c` -- here and in the Stop
-	# hook, via PJ_TEST_CMD -- and a directory called "my app" would otherwise
-	# split into `-C my` and a target named `app`.
-	test_cmd="make -C $(shell_word "$(printf '%s' "$discovered" | head -1)") test"
-fi
+# Resolved by agents/lib/gate.sh, shared with pj-stack-verify and
+# pj-affected-tests: --test-cmd if given, else an executable .pj/test, else
+# `make test`, else the one `make -C <dir> test` below the project root.
+pj_gate_resolve "$test_cmd" || fail "$pj_gate_error"
+test_cmd="$pj_gate_cmd"
 
 # The agents are not told the gate here: each session inherits PJ_TEST_CMD,
 # and the session-start hook announces it -- the one mechanism an interactive

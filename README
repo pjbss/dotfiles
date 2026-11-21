@@ -409,6 +409,12 @@ later with everything where you left it.
   in the VM yourself and `pj-sbx-verify` on the host afterwards, which is the
   better shape when you're already inside the VM or the run is long enough to
   outlive an ssh session.
+- `pj-stack-verify [--test-cmd CMD]` -- runs the test gate on every branch of
+  the current `gh stack`, bottom layer first, stops at the first one that
+  fails and names it, then checks the branch you started on back out. The
+  gate resolves the way `pj-run-issues` resolves it (`.pj/test`, else
+  `make test`, else the one `make -C <dir> test`). Run it after a rebase:
+  each layer becomes its own pull request, so each has to be green on its own.
 
 ### What's inside every sandbox
 

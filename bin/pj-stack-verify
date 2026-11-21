@@ -1,0 +1,118 @@
+#!/bin/sh
+# pj-stack-verify
+#
+# Runs the test gate on every branch of the current gh stack, bottom layer
+# first, and names the first one that fails. Each layer becomes its own pull
+# request, so each has to be green on its own -- including after a rebase
+# moved the layers under it, which is exactly when a layer that passed while
+# it was being built can stop passing without anyone touching it.
+#
+# Usage: pj-stack-verify [--test-cmd CMD] [--help|-h]
+#
+#   --test-cmd CMD  Command to run on each layer, with `sh -c` from the
+#                   project root (default: resolved the way pj-run-issues
+#                   resolves its gate -- an executable .pj/test, else
+#                   `make test`, else the one `make -C <dir> test` below).
+#
+# Run from the project root, on any branch of the stack (or its trunk). It
+# refuses a dirty tree, since checking out each layer would carry the changes
+# along or fail, and a branch that isn't part of a stack. The layers come from
+# `gh stack view --json`. It stops at the first failing layer, printing the
+# tail of its output, and always checks the branch it started on back out,
+# whether it passed or not. Exits 0 when every layer passes, 1 otherwise.
+
+set -eu
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+BIN_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+DOTFILES_HOME="$(cd -P "$BIN_DIR/.." && pwd)"
+
+. "$DOTFILES_HOME/sandbox/lib/color.sh"
+. "$DOTFILES_HOME/sandbox/lib/help.sh"
+. "$DOTFILES_HOME/agents/lib/gate.sh"
+
+fail() {
+	printf "%spj-stack-verify:%s %s\n" "$C_RED" "$C_RESET" "$1" >&2
+	exit 1
+}
+
+test_cmd=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--help | -h)
+			sandbox_script_help "$SOURCE"
+			exit 0
+			;;
+		--test-cmd)
+			[ $# -ge 2 ] && [ -n "$2" ] || fail "--test-cmd needs a command, e.g. --test-cmd 'make -C backend test'"
+			test_cmd="$2"
+			shift 2
+			;;
+		*)
+			fail "unknown argument '$1' -- see 'pj-stack-verify --help'"
+			;;
+	esac
+done
+
+git rev-parse --show-toplevel >/dev/null 2>&1 || fail "must be run from inside a git repository"
+
+command -v gh >/dev/null 2>&1 && gh stack --version </dev/null >/dev/null 2>&1 ||
+	fail "gh stack isn't available -- install the extension with 'gh extension install github/gh-stack'"
+
+[ -z "$(git status --porcelain)" ] ||
+	fail "the working tree is dirty -- checking out each layer would carry the changes along or fail. Commit or stash them first."
+
+stack_json="$(gh stack view --json </dev/null 2>&1)" ||
+	fail "can't read the stack: $(printf '%s' "$stack_json" | tail -n 1)"
+
+# Bottom layer first: gh-stack v0.3.0 lists `branches` in stack order, from
+# the one on the trunk up to the top.
+layers="$(printf '%s' "$stack_json" | python3 -c '
+import json, sys
+for branch in json.load(sys.stdin)["branches"]:
+    print(branch["name"])
+')" || fail "couldn't parse 'gh stack view --json'"
+[ -n "$layers" ] || fail "the stack has no branches to verify"
+
+pj_gate_resolve "$test_cmd" || fail "$pj_gate_error"
+test_cmd="$pj_gate_cmd"
+
+here() { git symbolic-ref --quiet --short HEAD || git rev-parse HEAD; }
+
+# restore -- back to where it started on every way out -- a red layer, an
+# interrupt, or a clean finish -- so verifying never leaves you on some other
+# branch. When that's impossible (something in the tree is in the way), it
+# says so rather than leaving you to discover it.
+restore() {
+	rm -f "$output"
+	[ "$(here)" = "$start" ] && return 0
+	git checkout -q "$start" 2>/dev/null ||
+		printf "%spj-stack-verify:%s couldn't check %s back out -- you're still on %s; 'git status' shows what's in the way\n" \
+			"$C_RED" "$C_RESET" "$start" "$(here)" >&2
+}
+
+start="$(here)"
+output="$(mktemp)"
+trap restore EXIT
+trap 'exit 130' INT TERM
+
+total=0
+for layer in $layers; do
+	git checkout -q "$layer" || fail "couldn't check out $layer"
+	if ! sh -c "$test_cmd" </dev/null >"$output" 2>&1; then
+		printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$layer"
+		tail -n 20 "$output" | sed 's/^/    /'
+		printf "%spj-stack-verify:%s '%s' fails on %s, the first failing layer\n" "$C_RED" "$C_RESET" "$test_cmd" "$layer" >&2
+		exit 1
+	fi
+	# Checking out the next layer would carry this into its run, or fail.
+	if [ -n "$(git status --porcelain)" ]; then
+		printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$layer"
+		fail "the gate left the working tree dirty on $layer -- running it on the next layer would carry the change along. The changes are left in place; 'git status' shows them."
+	fi
+	printf '%s✓%s %s\n' "$C_GREEN" "$C_RESET" "$layer"
+	total=$((total + 1))
+done
+
+echo "all $total layer(s) pass '$test_cmd'"

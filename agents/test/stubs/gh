@@ -1,0 +1,167 @@
+#!/bin/sh
+# A stand-in for `gh` with GitHub's gh-stack extension (v0.3.0), for tests
+# that drive stacked branches without the network or the real extension. It
+# models the subset the loop and pj-stack-verify use, over real git branches
+# in the current repository:
+#
+#   gh --version | gh stack --version
+#   gh stack init [--base B] BRANCH     create the first layer on B (default:
+#                                       the current branch) and check it out
+#   gh stack add BRANCH                 add a layer on top; refused (exit 5,
+#                                       the real message) unless on the top
+#   gh stack top | checkout BRANCH      switch layers
+#   gh stack view --json                {trunk, currentBranch, branches[]},
+#                                       bottom layer first; exit 2 off-stack
+#   gh stack rebase --upstack --no-trunk
+#                                       rebase every layer above the current
+#                                       one onto the layer below it
+#
+# Anything else exits 1 rather than pretending to succeed. State lives in the
+# repository's git dir (stub-gh-stack: a `trunk NAME` line, then one
+# `BRANCH BASE` line per layer, bottom first, BASE being the commit the layer
+# was last based on), and every call is appended to stub-gh.log beside it.
+
+set -eu
+
+git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || {
+	echo "stub gh: not in a git repository" >&2
+	exit 1
+}
+state="$git_dir/stub-gh-stack"
+printf '%s\n' "$*" >> "$git_dir/stub-gh.log"
+
+die() {
+	printf '%s\n' "$2" >&2
+	exit "$1"
+}
+
+current_branch() { git symbolic-ref --quiet --short HEAD || true; }
+trunk() { sed -n 's/^trunk //p' "$state"; }
+layers() { sed '1d' "$state" | cut -d' ' -f1; }
+top_layer() { layers | tail -n 1; }
+is_layer() { layers | grep -qxF "$1"; }
+
+# parent_of BRANCH -- the layer below BRANCH, or the trunk for layer 1.
+parent_of() {
+	parent="$(trunk)"
+	for layer in $(layers); do
+		[ "$layer" = "$1" ] && { printf '%s\n' "$parent"; return; }
+		parent="$layer"
+	done
+}
+
+base_of() { awk -v b="$1" 'NR > 1 && $1 == b { print $2 }' "$state"; }
+
+set_base() {
+	awk -v b="$1" -v s="$2" 'NR > 1 && $1 == b { $2 = s } { print }' "$state" > "$state.tmp"
+	mv "$state.tmp" "$state"
+}
+
+require_stack() {
+	[ -f "$state" ] || die 2 "✗ no stack found in this repository"
+}
+
+case "${1:-}" in
+	--version)
+		echo "gh version 0.0.0-stub"
+		exit 0
+		;;
+	stack) shift ;;
+	*) die 1 "stub gh: unsupported command: $*" ;;
+esac
+
+sub="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$sub" in
+	--version)
+		echo "gh stack version 0.3.0-stub"
+		;;
+
+	init)
+		base="$(current_branch)"
+		if [ "${1:-}" = "--base" ]; then
+			base="${2:?--base needs a branch}"
+			shift 2
+		fi
+		branch="${1:?init needs a branch name}"
+		[ ! -f "$state" ] || die 1 "✗ a stack already exists in this repository"
+		git checkout -q -b "$branch" "$base"
+		printf 'trunk %s\n%s %s\n' "$base" "$branch" "$(git rev-parse "$base")" > "$state"
+		echo "✓ Created and checked out branch \"$branch\""
+		;;
+
+	add)
+		require_stack
+		branch="${1:?add needs a branch name}"
+		[ "$(current_branch)" = "$(top_layer)" ] ||
+			die 5 "✗ can only add branches to the top of the stack; run \`gh stack top\` then \`gh stack add\`"
+		base="$(git rev-parse HEAD)"
+		git checkout -q -b "$branch"
+		printf '%s %s\n' "$branch" "$base" >> "$state"
+		echo "✓ Created and checked out branch \"$branch\""
+		;;
+
+	top)
+		require_stack
+		git checkout -q "$(top_layer)"
+		echo "✓ Switched to $(top_layer)"
+		;;
+
+	checkout)
+		require_stack
+		branch="${1:?checkout needs a branch name}"
+		is_layer "$branch" || die 1 "✗ branch \"$branch\" is not part of the stack"
+		git checkout -q "$branch"
+		echo "✓ Switched to $branch"
+		;;
+
+	view)
+		require_stack
+		here="$(current_branch)"
+		[ "$here" = "$(trunk)" ] || is_layer "$here" ||
+			die 2 "✗ current branch \"$here\" is not part of a stack"
+		[ "${1:-}" = "--json" ] || {
+			printf 'Stack: (%s)' "$(trunk)"
+			for layer in $(layers); do printf ' <- %s' "$layer"; done
+			echo
+			exit 0
+		}
+		printf '{\n  "trunk": "%s",\n  "currentBranch": "%s",\n  "branches": [' "$(trunk)" "$here"
+		sep=""
+		for layer in $(layers); do
+			needs_rebase=false
+			git merge-base --is-ancestor "$(parent_of "$layer")" "$layer" || needs_rebase=true
+			is_current=false
+			[ "$layer" = "$here" ] && is_current=true
+			printf '%s\n    {"name": "%s", "base": "%s", "isCurrent": %s, "isMerged": false, "isQueued": false, "needsRebase": %s}' \
+				"$sep" "$layer" "$(base_of "$layer")" "$is_current" "$needs_rebase"
+			sep=","
+		done
+		printf '\n  ]\n}\n'
+		;;
+
+	rebase)
+		require_stack
+		[ "${1:-}" = "--upstack" ] && [ "${2:-}" = "--no-trunk" ] ||
+			die 1 "stub gh: only 'stack rebase --upstack --no-trunk' is modelled"
+		start="$(current_branch)"
+		is_layer "$start" || die 2 "✗ current branch \"$start\" is not part of a stack"
+		above=""
+		for layer in $(layers); do
+			[ -n "$above" ] && {
+				parent="$(parent_of "$layer")"
+				new_base="$(git rev-parse "$parent")"
+				git rebase -q --onto "$parent" "$(base_of "$layer")" "$layer" >/dev/null
+				set_base "$layer" "$new_base"
+			}
+			[ "$layer" = "$start" ] && above=1
+		done
+		git checkout -q "$start"
+		echo "✓ Rebased the branches above $start"
+		;;
+
+	*)
+		die 1 "stub gh: unsupported stack command: $sub"
+		;;
+esac
