@@ -31,7 +31,7 @@ STOP_TESTS="$HOOKS_DIR/pj-hook-stop-tests.sh"
 # test. Anything inherited would leak into the ones that don't -- and under
 # pj-run-issues PJ_TEST_CMD is this very repo's suite, so the hook would run it
 # from inside itself, recursing without end.
-unset PJ_STOP_TESTS PJ_TEST_DIR PJ_TEST_CMD PJ_PROJECT_ROOT
+unset PJ_STOP_TESTS PJ_TEST_DIR PJ_TEST_CMD PJ_PROJECT_ROOT PJ_RUN_ISSUES
 
 fixture_root="$(mktemp -d)"
 trap 'rm -rf "$fixture_root"' EXIT
@@ -46,12 +46,15 @@ import json, sys
 print(json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                   "tool_input": {"command": sys.argv[1]}}))' "$1")"
 
-	if out="$(printf '%s' "$payload" | PJ_SANDBOX_MARKER="$marker" "$GUARD" 2>&1)"; then
+	if out="$(printf '%s' "$payload" | PJ_SANDBOX_MARKER="$marker" PJ_RUN_ISSUES="${PJ_RUN_ISSUES:-}" "$GUARD" 2>&1)"; then
 		rc=0
 	else
 		rc=$?
 	fi
 }
+
+# delete is unstack's documented alias in gh-stack v0.3.0.
+PUBLISHING="submit push sync merge link unstack delete"
 
 # guard_write PATH -> $rc, $out
 guard_write() {
@@ -98,6 +101,25 @@ assert_exit_code 0 "$rc" "sudo is not blocked outside a sandbox"
 guard_write "$HOME/some-file"
 assert_exit_code 0 "$rc" "writing outside a project is not blocked outside a sandbox"
 
+# Publishing a stack is the human's step. On the host it's refused only under
+# the loop's marker: an interactive host session is where publishing belongs.
+guard_bash "gh stack submit"
+assert_exit_code 0 "$rc" "gh stack submit is allowed in an interactive host session"
+for sub in $PUBLISHING; do
+	PJ_RUN_ISSUES=1 guard_bash "gh stack $sub"
+	assert_exit_code 2 "$rc" "gh stack $sub is refused on the host during a loop run"
+done
+PJ_RUN_ISSUES=1 guard_bash "cd /repo && gh stack submit --auto"
+assert_contains "$out" "publishing" "the refusal says publishing is the human's step"
+PJ_RUN_ISSUES=1 guard_bash "gh stack add x"
+assert_exit_code 0 "$rc" "local stack operations are allowed during a loop run"
+
+containment="$(sed -n '/^### Containment/,/^### /p' "$DOTFILES_HOME/README" | tr '\n' ' ')"
+assert_contains "$containment" "gh stack submit" "README Containment lists the publishing refusal"
+assert_contains "$containment" "PJ_RUN_ISSUES=1" "and the loop marker that extends it to the host"
+assert_contains "$(sed -n '1,/^set -eu/p' "$GUARD")" "gh stack submit, push, sync, merge, link, unstack" \
+	"the hook's header lists the publishing refusal"
+
 # === sandbox level ==========================================================
 
 printf 'marker\n' > "$marker"
@@ -117,6 +139,16 @@ assert_exit_code 2 "$rc" "piping a download into a shell is blocked inside a san
 
 guard_bash "git commit -m 'work'"
 assert_exit_code 0 "$rc" "committing inside a sandbox is allowed -- it's the whole point"
+
+for sub in $PUBLISHING; do
+	guard_bash "gh stack $sub"
+	assert_exit_code 2 "$rc" "gh stack $sub is refused inside a sandbox"
+	assert_contains "$out" "from the host" "the gh stack $sub refusal says where publishing belongs"
+done
+for local_op in "gh stack add x" "gh stack view --json" "gh stack rebase --upstack --no-trunk"; do
+	guard_bash "$local_op"
+	assert_exit_code 0 "$rc" "'$local_op' is allowed inside a sandbox"
+done
 
 guard_bash "make test"
 assert_exit_code 0 "$rc" "running the test suite inside a sandbox is allowed"

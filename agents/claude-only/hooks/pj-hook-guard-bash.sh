@@ -21,6 +21,12 @@
 #       directory; it must only ever be exercised against a scratch one)
 #     - rm -rf against $HOME or /
 #
+#   Inside a sandbox, and on the host during a pj-run-issues run
+#   (PJ_RUN_ISSUES=1):
+#     - publishing a stack: gh stack submit, push, sync, merge, link, unstack
+#       (and delete, unstack's alias; local stack work -- init, add, top,
+#       checkout, view, rebase -- is fine)
+#
 #   Inside a sandbox only (/etc/pj-sandbox present, written at spawn time):
 #     - writing anywhere outside /workspace
 #     - any write under the mounted host git directory -- files there run on
@@ -88,6 +94,20 @@ case "$tool_name" in
 				deny "refusing a recursive delete of the home directory or filesystem root."
 				;;
 		esac
+
+		# Publishing a stack -- opening, pushing or merging its pull requests,
+		# or tearing it down -- is the human's step, after reading the
+		# layers. Refused in a sandbox and, on the host too, during a loop run
+		# (PJ_RUN_ISSUES=1, exported by pj-run-issues to every agent it
+		# starts). Local stack work (init, add, top, checkout, view, rebase)
+		# stays allowed everywhere.
+		if in_sandbox || [ "${PJ_RUN_ISSUES:-}" = 1 ]; then
+			case "$command_text" in
+				*"gh stack submit"*|*"gh stack push"*|*"gh stack sync"*|*"gh stack merge"*|*"gh stack link"*|*"gh stack unstack"*|*"gh stack delete"*)
+					deny "refusing to publish a stack (gh stack submit/push/sync/merge/link/unstack/delete) from an agent -- publishing is the human's step. Build and commit the layers here; they get published from the host after reviewing them."
+					;;
+			esac
+		fi
 
 		in_sandbox || exit 0
 

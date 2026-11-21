@@ -570,6 +570,16 @@ without it the agent can't run. The reasoning is simply that a credential which
 was never forwarded can't be exfiltrated by a prompt injection sitting in the
 repo the agent was pointed at.
 
+Agents never publish a stack either. The Claude Code guard hook refuses
+`gh stack submit`, `push`, `sync`, `merge`, `link` and `unstack` (or its
+alias `delete`) inside a
+sandbox, and on the host too whenever `PJ_RUN_ISSUES=1` is set -- which
+`pj-run-issues` exports to every agent it starts. Local stack work (`init`,
+`add`, `top`, `checkout`, `view`, `rebase`) stays allowed. Publishing is your
+step, from the host, after reading the layers; an interactive host session
+without the marker isn't restricted. Like every guard that runs where the agent
+does, this is defense in depth, not the boundary.
+
 **Residual risk, stated plainly.** This is a boundary against mistakes,
 runaway agents, and prompt injection -- not against an adversary who already
 controls what the model emits and is willing to spend effort. The guest is

@@ -21,6 +21,11 @@ DOTFILES_HOME="$(cd -P "$TEST_DIR/../.." && pwd)"
 
 . "$DOTFILES_HOME/test/assert.sh"
 
+# The loop exports PJ_RUN_ISSUES=1 to its children, and the tests below assert
+# that. Inherited from an outer loop (this suite runs as the gate of one), it
+# would make those assertions pass whether or not this loop exported it.
+unset PJ_RUN_ISSUES
+
 RUN_ISSUES="$DOTFILES_HOME/bin/pj-run-issues"
 
 fixture_root="$(mktemp -d)"
@@ -88,8 +93,8 @@ if [ -n "${STUB_ENV_LOG:-}" ]; then
 		*"pj-tdd skill"*) call=tdd ;;
 		*) call=other ;;
 	esac
-	printf '%s PJ_TEST_DIR=%s PJ_TEST_CMD=%s PJ_PROJECT_ROOT=%s\n' "$call" \
-		"${PJ_TEST_DIR:-unset}" "${PJ_TEST_CMD:-unset}" "${PJ_PROJECT_ROOT:-unset}" \
+	printf '%s PJ_TEST_DIR=%s PJ_TEST_CMD=%s PJ_PROJECT_ROOT=%s PJ_RUN_ISSUES=%s\n' "$call" \
+		"${PJ_TEST_DIR:-unset}" "${PJ_TEST_CMD:-unset}" "${PJ_PROJECT_ROOT:-unset}" "${PJ_RUN_ISSUES:-unset}" \
 		>> "$STUB_ENV_LOG"
 fi
 
@@ -510,6 +515,11 @@ assert_ok "the spec verdict keeps its file" test -f "$repo/issues/reviews/001-sl
 assert_ok "the quality reviewer's own lines are labeled qual" \
 	grep -q -E 'qual +.*stub: quality-reviewed 001-slice.md' <<<"$out"
 
+# Every child the loop starts carries the loop marker, which the guard hook
+# reads to refuse publishing a stack even on the host.
+assert_eq "" "$(grep -v 'PJ_RUN_ISSUES=1$' "$env_log" || true)" "every invocation the loop made sees PJ_RUN_ISSUES=1"
+assert_contains "$(cat "$env_log")" "commit " "the marker check covered the commit invocation too"
+
 repo="$(make_repo lenses-one-pass 1)"
 env_log="$fixture_root/lenses-one-pass-env.log"
 remediate_log="$fixture_root/lenses-one-pass-remediate.log"
@@ -661,7 +671,7 @@ env_log="$fixture_root/everycommit-env.log"
 STUB_ENV_LOG="$env_log" PJ_TEST_DIR="$fixture_root/stale" run_loop "$project"
 assert_contains "$(cat "$env_log")" "commit PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project" \
 	"the commit invocation gets PJ_TEST_CMD and PJ_PROJECT_ROOT, and no PJ_TEST_DIR"
-assert_eq "0" "$(grep -vc "PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project\$" "$env_log" || true)" \
+assert_eq "0" "$(grep -vc "PJ_TEST_DIR=unset PJ_TEST_CMD=make -C backend test PJ_PROJECT_ROOT=$project PJ_RUN_ISSUES=1\$" "$env_log" || true)" \
 	"no invocation of any kind gets a different environment"
 
 # The discovered directory goes into a string that `sh -c` runs, in the gate

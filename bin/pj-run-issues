@@ -117,6 +117,13 @@
 # directory is the project root, which in a monorepo has no Makefile, and the
 # hook skips silently when it finds none. The session-start hook reads the same
 # PJ_TEST_CMD to tell the agent what its gate is.
+#
+# Sets PJ_RUN_ISSUES=1 too, a separate marker meaning "an unattended loop run":
+# the guard hook refuses to publish a stack (gh stack submit, push, sync,
+# merge, link, unstack) under it, even on the host, because publishing is the
+# human's step after reading the layers. PJ_STOP_TESTS isn't reused for this --
+# it means "arm the Stop hook", and one variable meaning two things is how one
+# of them gets switched off by accident.
 
 set -eu
 
@@ -458,7 +465,7 @@ run_claude() {
 			-u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
 			-u AWS_PROFILE -u AWS_REGION -u AWS_DEFAULT_REGION \
 			-u PJ_TEST_DIR \
-			PJ_STOP_TESTS=1 PJ_TEST_CMD="$test_cmd" PJ_PROJECT_ROOT="$project_root" \
+			PJ_STOP_TESTS=1 PJ_RUN_ISSUES=1 PJ_TEST_CMD="$test_cmd" PJ_PROJECT_ROOT="$project_root" \
 			claude -p "$prompt" \
 			--dangerously-skip-permissions \
 			$format_args \
