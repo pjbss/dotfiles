@@ -51,18 +51,50 @@ wrong precisely enough that the next pass can fix it.
    the criterion's Traceability row names it): otherwise "moved to manual
    tests" is a way to retire a criterion nobody ever verified.
 
-4. Then review the change on its own merits, in this order:
+4. Then review the change on its own merits:
    - **Correctness**: what input or state makes this behave wrong? Prefer one
      concrete failing scenario to a general worry.
-   - **Tests**: do they assert the behavior, or merely that the code ran?
-     Would they fail if the implementation were reverted?
    - **Scope**: anything in the diff that no acceptance criterion asked for.
      Unrequested scope is a finding — it's work nobody reviewed the need for.
-   - **Fit**: does it match the conventions of the code around it, and reuse
-     what's already there rather than reimplementing it?
 
-5. Run the test suite yourself (`make test`). Do not take a green claim on
+   How the code reads (naming, simplicity, reuse, consistency) is the
+   quality lens's job, `pj-review-quality`, not this one.
+
+5. Check that the tests prove something. For each test in the change, ask:
+   would it fail if the implementation were reverted? If you can't convince
+   yourself it would, the criterion it stands for is unsupported. Where it's
+   cheap and safe, demonstrate it: break the implementation in a scratch
+   copy, run the test, and see it fail — never by editing the real tree. An
+   empirically confirmed weak test is worth far more than a suspected one.
+   Also look for a test that asserts a mechanism (a function was called, a
+   file exists) instead of an outcome, and for one that is green for the
+   wrong reason: a `set -e` exit before the assertions, a subshell
+   swallowing a failure, a fixture that silently wasn't created.
+
+6. Run the test suite yourself (`make test`). Do not take a green claim on
    trust; a review that didn't run the tests should say so explicitly.
+
+7. Triage every finding with one of the severities below.
+
+## Triage
+
+Every finding gets exactly one severity, in its bold label. `pj-review-quality`
+uses these same definitions.
+
+- **`[blocking]`**: a correctness bug (a failing or unrun `make test` and a
+  quietly reversed PRD decision included), an unsupported or unprovable acceptance
+  criterion (including one the resolution notes claim was moved to a manual
+  case that isn't there), duplication of existing code, unrequested scope or
+  abstraction, or code that can't be followed without the author's
+  explanation.
+- **`[note]`**: real but minor. It never blocks. It is carried to the stack
+  review, which must fix it or explicitly accept it.
+- **`[pre-existing]`**: not caused by this change. It never blocks, and is
+  listed for `pj-improve-architecture`. A problem this change caused is never
+  `[pre-existing]`, however old the code around it.
+
+The verdict is `changes-requested` exactly when at least one finding is
+`[blocking]`, and `approved` otherwise, notes or not.
 
 ## Output
 
@@ -89,8 +121,10 @@ first, exact, and lowercase-hyphenated. Then:
 
 ## Findings
 
-1. **<short label>** — `path/to/file.sh:LINE`
+1. **[blocking] <short label>** — `path/to/file.sh:LINE`
    What's wrong, the concrete case where it goes wrong, and what would fix it.
+2. **[note] <short label>** — `path/to/file.sh:LINE`
+   ...
 
 ## Acceptance criteria
 
@@ -98,12 +132,8 @@ first, exact, and lowercase-hyphenated. Then:
 - [ ] Criterion text — **claimed but unsupported**: no test asserts this
 ```
 
-Use `changes-requested` for: a failing or unrun test suite, an unsupported
-acceptance criterion, an acceptance criterion no test could prove, a
-criterion the resolution notes claim was moved to a manual case (in the
-test plan or `issues/manual-tests.md`) that isn't there, a correctness bug,
-or a reversed PRD decision. Style preferences alone are not grounds for it
-— note them under Findings and approve.
+Pick the verdict by the triage rule above: `changes-requested` if any
+finding is `[blocking]`, otherwise `approved`.
 
 If there is nothing to say, say so briefly. A review that pads itself with
 generic advice trains the next reader to skim it.
