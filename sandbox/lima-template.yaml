@@ -150,8 +150,36 @@ provision:
 
     npm_prefix="$(npm config get prefix)"
     chown -R {{.User}}:"$(id -gn {{.User}})" "$npm_prefix/lib/node_modules" "$npm_prefix/bin" 2>/dev/null || true
+# The gh-stack extension, for pj-run-issues' stack mode (one gh stack branch
+# per planned layer). gh extensions install per user, under
+# ~/.local/share/gh/extensions, hence a `mode: user` step after the system one
+# that installs gh. Local stack operations (init, add, view, rebase) need no
+# GitHub auth, and neither does installing a public extension, so every gh
+# call here runs against an empty throwaway gh config with the token variables
+# unset: it works the same in a --no-creds VM and never reads credentials in
+# one that has them. A cheap no-op on re-boot once the pinned version is in
+# place. (Lima runs every system step before any user step, whatever their
+# order here.)
+- mode: user
+  script: |
+    #!/bin/sh
+    set -eux
+    # The one place the version is pinned. Bumping it means re-checking
+    # agents/test/stubs/gh against the real extension: the stack-mode tests
+    # run against that stub, which encodes this version's behaviour.
+    GH_STACK_VERSION=0.3.0
+    # Every gh call, the version check included, runs against an empty gh
+    # config with the token variables unset: gh reads its config dir on
+    # every invocation, and in a VM with credentials that's the host's.
+    empty_config="$(mktemp -d)"
+    no_creds() { env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$empty_config" "$@" </dev/null; }
+    if ! no_creds gh stack --version 2>/dev/null | grep -qF "version $GH_STACK_VERSION"; then
+      no_creds gh extension remove stack >/dev/null 2>&1 || true
+      no_creds gh extension install github/gh-stack --pin "v$GH_STACK_VERSION"
+    fi
+    rm -rf "$empty_config"
 # The spawn's `--base <name>` provisioning (issue 003), spliced in here by
-# sandbox_render_lima_config: a second `provision:` list item (its own
+# sandbox_render_lima_config: another `provision:` list item (its own
 # `- mode: system` / `script: |` ...) from sandbox/templates/<name>, or
 # nothing at all for `--base none`. Must sit at this exact column-0
 # position -- the same indentation a new top-level `provision:` list item
