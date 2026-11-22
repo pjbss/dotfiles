@@ -43,7 +43,9 @@
 #   --test-cmd CMD  Command that gates the run, run with `sh -c` from the
 #                   project root (default: .pj/test, else discovered, see
 #                   below).
-#   --no-review     Skip both review lenses. For a first smoke test only.
+#   --no-review     Skip both review lenses, and the whole-stack review of a
+#                   stacked run (its per-layer gate still runs). For a first
+#                   smoke test only.
 #   --dry-run       Print the plan -- which issues, in what order -- and exit
 #                   without invoking anything.
 #   --plain         Print each agent's final message instead of its live event
@@ -130,6 +132,16 @@
 # /dev/null, and a failing one stops the run. The end-of-run sweep runs on the
 # top layer. Publishing the stack stays the human's step.
 #
+# Once a stacked run has drained its plan's queue and the full sweep passes,
+# the whole stack is checked before the run ends: pj-stack-verify runs the gate
+# on every layer, then pj-review-stack reviews the whole diff, trunk to top,
+# against the PRD, the plan and every per-layer review, in its own process
+# under the `stak` label. A failing layer or a `changes-requested` stops the
+# run with exit 1 and every layer left committed. The stack review is skipped,
+# saying why, when the run stopped early or --max-issues left plan issues open;
+# under --no-review the per-layer gate still runs and only the review is
+# skipped.
+#
 # Sets PJ_RUN_ISSUES=1 too, a separate marker meaning "an unattended loop run":
 # the guard hook refuses to publish a stack (gh stack submit, push, sync,
 # merge, link, unstack) under it, even on the host, because publishing is the
@@ -191,6 +203,7 @@ phase_color() {
 		tdd) printf '%s' "$C_GREEN" ;;
 		rev) printf '%s' "$C_MAGENTA" ;;
 		qual) printf '%s%s' "$C_BOLD" "$C_MAGENTA" ;;
+		stak) printf '%s%s' "$C_BOLD" "$C_CYAN" ;;
 		fix) printf '%s' "$C_YELLOW" ;;
 		gate) printf '%s' "$C_BLUE" ;;
 		git) printf '%s' "$C_BOLD" ;;
@@ -287,14 +300,29 @@ do not commit -- this loop commits once both reviews approve." \
 		exit 1
 	}
 
+	judge_verdict "$lens_label" "$lens_file" "$lens_skill" "$issue_name"
+}
+
+# judge_verdict LABEL VERDICT_FILE SKILL SUBJECT
+#
+# Reads a review's verdict file, puts its verdict and findings on the console
+# under LABEL, and sets $lens_verdict to `approved` or `changes-requested`.
+# Stops the run on anything else: a review that wrote no file, or a first line
+# this loop can't parse, has not reviewed anything.
+judge_verdict() {
+	lens_label="$1"
+	lens_file="$2"
+	lens_skill="$3"
+	lens_subject="$4"
+
 	if [ ! -f "$lens_file" ]; then
 		say_phase "$lens_label" "$lens_skill produced no verdict file ($lens_file) -- stopping"
-		log "stopped: no $lens_file for $issue_name"
+		log "stopped: no $lens_file from $lens_skill for $lens_subject"
 		exit 1
 	fi
 
 	lens_line="$(head -1 "$lens_file")"
-	log "$lens_skill verdict for $issue_name: $lens_line"
+	log "$lens_skill verdict for $lens_subject: $lens_line"
 
 	case "$lens_line" in
 		"Verdict: approved")
@@ -842,6 +870,79 @@ if [ "$completed" -gt 0 ] && [ -z "$stopped_early" ]; then
 		say_phase gate "the full sweep is failing across the whole tree, though every issue passed its own gate -- stopping. The $completed commit(s) this run made are left in place; each was reviewed and green on its own"
 		log "stopped: the full sweep failed after $completed issue(s)"
 		exit 1
+	fi
+fi
+
+# --- the whole-stack review, once the stack is built -------------------------
+#
+# Each layer was reviewed on its own; nothing yet has looked at the stack as
+# one change. Only once the plan's queue is fully drained: a stack missing a
+# layer isn't the stack the plan describes, so reviewing it would be reviewing
+# something nobody will publish. First every layer is re-run through the gate
+# (pj-stack-verify) -- each becomes its own pull request -- then pj-review-stack
+# reads the whole diff against the PRD, the plan and every per-layer review.
+# Findings stop the run with every layer still committed; fixing them comes
+# next.
+
+# plan_has_open_issues -- true while any open issue still belongs to the plan.
+plan_has_open_issues() {
+	for open_issue in $(pj_issues_scan "$PJ_ISSUES_DIR"); do
+		[ "$(pj_issues_plan_ref "$open_issue")" = "$plan_ref" ] && return 0
+	done
+	return 1
+}
+
+# verify_stack -- the gate on every layer, each on its own, as pj-stack-verify
+# runs it (as the full sweep). Stops the run on a red layer.
+verify_stack() {
+	say_phase stak "verifying every layer with pj-stack-verify"
+	if ! verify_out="$("$BIN_DIR/pj-stack-verify" --test-cmd "$test_cmd" </dev/null 2>&1)"; then
+		printf '%s\n' "$verify_out" | while IFS= read -r line; do say_sub stak "$line"; done
+		say_phase stak "a layer fails '$test_cmd' on its own -- stopping before the stack review"
+		log "stopped: pj-stack-verify failed"
+		exit 1
+	fi
+	printf '%s\n' "$verify_out" | while IFS= read -r line; do say_sub stak "$line"; done
+}
+
+review_stack() {
+	plan_base="$(basename "$plan_ref" .md)"
+	stack_file="issues/reviews/stack${plan_base#plan}.md"
+	top_branch="$(git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD)"
+
+	say_phase stak "reviewing the whole stack, $stack_trunk...$top_branch"
+	rm -f "$stack_file"
+	run_claude "Use the pj-review-stack skill to review the whole stack built from
+$plan_ref: every layer from $stack_trunk up to $top_branch, which is checked out.
+
+Write your verdict to $stack_file. Review only: do not change any code, do not
+commit, and do not publish the stack." "$run_dir/stack-review.log" stak || {
+		say_phase stak "claude exited non-zero during the stack review -- stopping"
+		log "stopped: claude failed in pj-review-stack"
+		exit 1
+	}
+
+	judge_verdict stak "$stack_file" pj-review-stack "the stack"
+	if [ "$lens_verdict" != approved ]; then
+		say_phase stak "the stack review requested changes -- stopping for a human. Every layer stays committed; $stack_file says what to fix, and in which layer"
+		log "stopped: the stack review requested changes"
+		exit 1
+	fi
+}
+
+if [ -n "$stack_trunk" ]; then
+	if [ -n "$stopped_early" ]; then
+		say_phase stak "skipping the stack review: the run stopped early"
+	elif plan_has_open_issues; then
+		say_phase stak "skipping the stack review: $plan_ref still has open issues, so the stack isn't finished"
+	else
+		verify_stack
+		if [ -z "$review" ]; then
+			# The gate still ran: --no-review skips model reviews, never a gate.
+			say_phase stak "skipping the stack review: --no-review"
+		else
+			review_stack
+		fi
 	fi
 fi
 

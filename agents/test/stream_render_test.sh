@@ -167,6 +167,8 @@ render --label qual --color
 assert_contains "$out" "$esc[1;35mqual" "the qual label is bold magenta"
 render --label rev --color
 assert_not_contains "$out" "$esc[1;35m" "rev keeps its own plain magenta"
+render --label stak --color
+assert_contains "$out" "$esc[1;36mstak" "the stak label (the whole-stack review) is bold cyan"
 
 # A second phase appends rather than truncating: three phases share one issue's
 # log, and a review that erased the implementation's lines would be worse than

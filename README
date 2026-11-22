@@ -504,6 +504,19 @@ stops the run with the command and its output. The plan's approval and the
 extension are checked before anything runs, so a run that can't build its
 stack never starts one. Issues without a branch make no `gh` calls at all.
 
+When a stacked run has drained its plan's queue, the stack is checked as a
+whole before the run ends. `pj-stack-verify` runs the gate on every layer,
+since each becomes its own pull request, and then `pj-review-stack` reviews
+the full diff from trunk to top, in its own process (labeled `stak`). It reads
+the PRD, the plan's interfaces and review focus, and every per-layer review,
+including the `[note]` findings they carried forward. It looks for what no
+single layer's review could see: seams that don't match, duplication across
+layers, a layer that no longer stands alone. Each finding names the layer that
+owns the fix, in `issues/reviews/stack.md`. A failing layer or requested
+changes stop the run with every layer still committed. A run stopped early, or
+cut short by `--max-issues` with plan issues still open, skips the stack review
+and says why.
+
 Each of those processes is asked for its event stream rather than its final
 message, and `agents/lib/stream_render.py` turns that back into one labeled
 line per tool call. Without it a phase prints nothing for minutes and then a

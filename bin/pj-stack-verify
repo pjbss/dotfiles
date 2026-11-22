@@ -14,6 +14,10 @@
 #                   resolves its gate -- an executable .pj/test, else
 #                   `make test`, else the one `make -C <dir> test` below).
 #
+# Each layer's gate runs with PJ_TEST_SCOPE=all, as the loop's end-of-run
+# sweep does: a clean checkout has no changed set for a gate like
+# pj-affected-tests to select from.
+#
 # Run from the project root, on any branch of the stack (or its trunk). It
 # refuses a dirty tree, since checking out each layer would carry the changes
 # along or fail, and a branch that isn't part of a stack. The layers come from
@@ -96,7 +100,10 @@ trap 'exit 130' INT TERM
 total=0
 for layer in $layers; do
 	git checkout -q "$layer" || fail "couldn't check out $layer"
-	if ! sh -c "$test_cmd" </dev/null >"$output" 2>&1; then
+	# Run as the full sweep: a clean layer checkout has no changed set, so a
+	# gate that runs only what changed (pj-affected-tests) would otherwise
+	# pass having run nothing.
+	if ! PJ_TEST_SCOPE=all sh -c "$test_cmd" </dev/null >"$output" 2>&1; then
 		printf '%s✗%s %s\n' "$C_RED" "$C_RESET" "$layer"
 		tail -n 20 "$output" | sed 's/^/    /'
 		printf "%spj-stack-verify:%s '%s' fails on %s, the first failing layer\n" "$C_RED" "$C_RESET" "$test_cmd" "$layer" >&2

@@ -86,6 +86,7 @@ issue_file="issues/$issue_name"
 # environment. Kept outside the repo so it never becomes part of the work.
 if [ -n "${STUB_ENV_LOG:-}" ]; then
 	case "$prompt" in
+		*"pj-review-stack skill"*) call=stack ;;
 		*"pj-review-quality skill"*) call=quality ;;
 		*"pj-review skill"*) call=review ;;
 		*"pj-commit skill"*) call=commit ;;
@@ -117,6 +118,32 @@ next_verdict() {
 }
 
 case "$prompt" in
+	*"pj-review-stack skill"*)
+		stack_file="$(printf '%s' "$prompt" | grep -o 'issues/reviews/stack[A-Za-z0-9._-]*\.md' | head -1)"
+		verdict="${STUB_STACK_VERDICT:-approved}"
+		if [ "${STUB_STACK_MODE:-}" != nofile ]; then
+			mkdir -p issues/reviews
+			cat > "$stack_file" <<VERDICT
+Verdict: $verdict
+
+## Reviewed
+
+stub stack review
+
+## Findings
+
+1. **[blocking] STUB_STACK_FINDING** -- \`src/stub.sh:9\`
+   Layer: w/01-slice
+   STUB_STACK_DETAIL
+
+## Carried-over notes
+
+None.
+VERDICT
+		fi
+		say_stub "stub: reviewed the stack -> $verdict"
+		;;
+
 	*"pj-review-quality skill"*)
 		verdict="$(next_verdict quality "${STUB_QUALITY_VERDICTS:-approved}")"
 		# nofile never writes the verdict; firstonly writes it on the first
@@ -1080,11 +1107,100 @@ STUB_GH_DIR="$STUBS" run_loop "$project"
 assert_exit_code 0 "$rc" "an unstacked queue runs as before with the stub gh on PATH"
 assert_eq "" "$(gh_log "$project")" "an unstacked queue makes no gh calls at all"
 
+# --- the whole-stack review, once the stack is drained ---
+
+# line_of TEXT NEEDLE -- the number of the first line of TEXT containing NEEDLE.
+line_of() { printf '%s\n' "$1" | { grep -n -F -e "$2" || true; } | head -1 | cut -d: -f1; }
+
+project="$(make_stacked_repo stack-review-ok)"
+env_log="$fixture_root/stack-review-ok-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 0 "$rc" "a drained stack with an approving stack review exits 0"
+assert_eq "1" "$(count_calls "$env_log" stack)" "the stack review runs once, in its own invocation"
+assert_ok "its verdict goes to issues/reviews/stack.md, named after the plan" test -f "$project/issues/reviews/stack.md"
+verify_line="$(line_of "$out" "all 2 layer(s) pass")"
+review_line="$(line_of "$out" "stub: reviewed the stack")"
+assert_ok "pj-stack-verify runs on every layer before the stack review" test "${verify_line:-999999}" -lt "${review_line:-0}"
+assert_ok "the stack reviewer's lines are labeled stak" grep -q -E 'stak +.*stub: reviewed the stack' <<<"$out"
+
+project="$(make_stacked_repo stack-review-rejects)"
+trunk="$(git -C "$project" branch --show-current)"
+STUB_GH_DIR="$STUBS" STUB_STACK_VERDICT=changes-requested run_loop "$project"
+assert_exit_code 1 "$rc" "a stack review requesting changes stops the run with exit 1"
+assert_ok "its findings are printed under stak" grep -q -E 'stak +↳ .*STUB_STACK_FINDING' <<<"$out"
+assert_contains "$out" "Layer: w/01-slice" "with the layer that owns each one"
+assert_eq "1" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1's commit is left in place"
+assert_eq "1" "$(commits_between "$project" w/01-slice w/02-slice)" "and layer 2's"
+
+project="$(make_stacked_repo stack-review-nofile)"
+STUB_GH_DIR="$STUBS" STUB_STACK_MODE=nofile run_loop "$project"
+assert_exit_code 1 "$rc" "a stack review that writes no verdict stops the run"
+assert_contains "$out" "issues/reviews/stack.md" "naming the missing verdict file"
+
+# A layer red at verify time but green during the run: the gate fails only on
+# layer 1 with nothing staged, which the per-issue gate never sees (the work
+# is staged then) but pj-stack-verify does.
+project="$(make_stacked_repo stack-verify-red)"
+env_log="$fixture_root/stack-verify-red-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" \
+	--test-cmd 'if git diff --cached --quiet && [ "$(git branch --show-current)" = w/01-slice ]; then echo VERIFY_LAYER_RED; exit 1; fi'
+assert_exit_code 1 "$rc" "a layer failing pj-stack-verify stops the run with exit 1"
+assert_contains "$out" "fails on w/01-slice" "the failing layer is named as the one that fails"
+assert_eq "0" "$(count_calls "$env_log" stack)" "no stack review is sent after a failed verify"
+
+# A gate that selects what to run by what changed (pj-affected-tests) finds
+# nothing changed on a clean layer checkout, so pj-stack-verify must run it as
+# the full sweep. This gate fails only with PJ_TEST_SCOPE=all on layer 1: the
+# per-issue gates (no scope) and the sweep (scope all, but on layer 2) pass.
+project="$(make_stacked_repo stack-verify-scope)"
+env_log="$fixture_root/stack-verify-scope-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" \
+	--test-cmd 'if [ "${PJ_TEST_SCOPE:-}" = all ] && [ "$(git branch --show-current)" = w/01-slice ]; then echo SCOPED_RED; exit 1; fi'
+assert_exit_code 1 "$rc" "pj-stack-verify runs each layer's gate as the full sweep (PJ_TEST_SCOPE=all)"
+assert_eq "0" "$(count_calls "$env_log" stack)" "so a layer red under the sweep stops the run before the stack review"
+
+# --no-review skips the stack review, a model review like the others, but
+# not the per-layer gate, the way it never skips the per-issue gate.
+project="$(make_stacked_repo stack-noreview-red)"
+STUB_GH_DIR="$STUBS" run_loop "$project" --no-review \
+	--test-cmd 'if git diff --cached --quiet && [ "$(git branch --show-current)" = w/01-slice ]; then echo VERIFY_LAYER_RED; exit 1; fi'
+assert_exit_code 1 "$rc" "--no-review still runs pj-stack-verify, and a red layer stops the run"
+project="$(make_stacked_repo stack-noreview-green)"
+env_log="$fixture_root/stack-noreview-green-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" --no-review
+assert_exit_code 0 "$rc" "a green stack under --no-review exits 0"
+assert_contains "$out" "all 2 layer(s) pass" "after verifying every layer"
+assert_eq "0" "$(count_calls "$env_log" stack)" "but sends no stack review"
+assert_contains "$out" "skipping the stack review: --no-review" "and says why"
+
+project="$(make_stacked_repo stack-review-partial)"
+env_log="$fixture_root/stack-review-partial-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" --max-issues 1
+assert_exit_code 0 "$rc" "a stacked run stopped by --max-issues still exits 0"
+assert_eq "0" "$(count_calls "$env_log" stack)" "it sends no stack review while plan issues are open"
+assert_contains "$out" "still has open issues" "and says that's why"
+
+project="$(make_repo stack-review-unstacked 1)"
+env_log="$fixture_root/stack-review-unstacked-env.log"
+STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 0 "$rc" "an unstacked run completes"
+assert_eq "0" "$(count_calls "$env_log" stack)" "an unstacked run sends no stack review"
+assert_contains "$(cat "$project"/issues/runs/*/run.log)" "pj-review verdict for 001-slice.md" \
+	"the run log says which issue each verdict was for"
+
+stak_color="$(phase_color_of stak)"
+assert_eq "$(printf '\033[1m\033[36m')" "$stak_color" "stak is bold cyan in phase_color"
+for label in tdd rev qual fix gate git loop; do
+	assert_ok "stak's color differs from $label's" test "$stak_color" != "$(phase_color_of "$label")"
+done
+
 # --- docs ---
 
 assert_contains "$readme_flat" "stack mode" "the README describes stack mode"
 assert_contains "$readme_flat" "gh stack init --base" "including how it creates the first layer"
 assert_contains "$header_flat" "Stack mode" "the script header describes stack mode"
 assert_contains "$header_flat" "isn't approved" "and its refusals"
+assert_contains "$readme_flat" "pj-review-stack" "the README describes the whole-stack review"
+assert_contains "$header_flat" "pj-review-stack" "and so does the script header"
 
 assert_report

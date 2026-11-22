@@ -114,6 +114,14 @@ assert_exit_code 1 "$rc" "the run still fails"
 assert_contains "$out" "couldn't check s/03-c back out" "a failed restore is reported"
 assert_contains "$out" "still on s/01-a" "with where the user actually is"
 
+# --- each layer's gate runs as the full sweep ---
+
+# A clean layer checkout has no changed set, so a gate that runs only what
+# changed (pj-affected-tests) would pass having run nothing.
+repo="$(make_stack scoped 0)"
+verify "$repo" --test-cmd '[ "${PJ_TEST_SCOPE:-}" = all ]'
+assert_exit_code 0 "$rc" "each layer's gate runs with PJ_TEST_SCOPE=all"
+
 # --- refusals ---
 
 repo="$(make_stack dirty 0)"
