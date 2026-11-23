@@ -147,6 +147,15 @@
 # under --no-review the per-layer gate still runs and only the review is
 # skipped.
 #
+# A stacked run that ends with an approved stack review finalizes the plan's
+# test plan with pj-write-test-plan (label `docs`; it must come out
+# `Status: final`, the repository untouched) and prints a handoff instead of
+# the usual closing lines: each layer bottom to top with its commit and both
+# review verdicts, the stack review, the verify result, the test plan and its
+# MT/EC cases, and `gh stack submit` as the next command -- plus, inside a
+# sandbox, the `gh stack init <layers>` to recreate the stack's metadata on the
+# host. Publishing stays the human's step.
+#
 # Sets PJ_RUN_ISSUES=1 too, a separate marker meaning "an unattended loop run":
 # the guard hook refuses to publish a stack (gh stack submit, push, sync,
 # merge, link, unstack) under it, even on the host, because publishing is the
@@ -209,6 +218,7 @@ phase_color() {
 		rev) printf '%s' "$C_MAGENTA" ;;
 		qual) printf '%s%s' "$C_BOLD" "$C_MAGENTA" ;;
 		stak) printf '%s%s' "$C_BOLD" "$C_CYAN" ;;
+		docs) printf '%s%s' "$C_BOLD" "$C_GREEN" ;;
 		fix) printf '%s' "$C_YELLOW" ;;
 		gate) printf '%s' "$C_BLUE" ;;
 		git) printf '%s' "$C_BOLD" ;;
@@ -437,6 +447,9 @@ if [ -n "$first_issue" ] && [ -n "$(pj_issues_branch "$first_issue")" ]; then
 		fail "$(basename "$first_issue") is a stack layer, and stack mode needs the gh-stack extension, but 'gh stack' isn't available -- install it with 'gh extension install github/gh-stack'."
 	stack_trunk="$(pj_issues_doc_header "$plan_file" Trunk)"
 	[ -n "$stack_trunk" ] || fail "$plan_ref has no 'Trunk:' line, so there is no branch to build the stack on."
+	# Checked now, not when the stack is done: the run ends by finalizing it.
+	[ -n "$(pj_issues_doc_header "$plan_file" "Test plan")" ] ||
+		fail "$plan_ref has no 'Test plan:' line, so there is no test plan to finalize when the stack is done."
 	say "stack mode: one gh stack branch per layer of $plan_ref, on $stack_trunk"
 fi
 
@@ -1057,6 +1070,98 @@ review_stack() {
 	fi
 }
 
+# finalize_test_plan -- once the stack is approved, pj-write-test-plan fills
+# the plan's test plan in from what the reviews recorded and the layers'
+# commits, in its own process (label `docs`). It has to come out `Status:
+# final`, and since the test plan is gitignored working state, the repository
+# itself must be untouched by it.
+finalize_test_plan() {
+	test_plan_ref="$(pj_issues_doc_header "$plan_file" "Test plan")"
+	[ -n "$test_plan_ref" ] || fail "$plan_ref has no 'Test plan:' line, so there is no test plan to finalize"
+	test_plan_file="$PJ_ISSUES_DIR/${test_plan_ref#issues/}"
+	head_before="$(git rev-parse HEAD)"
+	tree_before="$(git status --porcelain)"
+
+	say_phase docs "finalizing the test plan, $test_plan_ref"
+	run_claude "Use the pj-write-test-plan skill in finalize mode on $test_plan_ref:
+the stack built from $plan_ref has been reviewed and approved. Fill it in from
+the recorded reviews and the layers' commits, as the skill says.
+
+Change nothing but the test plan, and do not commit." "$run_dir/test-plan.log" docs || {
+		say_phase docs "claude exited non-zero while finalizing the test plan -- stopping"
+		log "stopped: claude failed finalizing $test_plan_ref"
+		exit 1
+	}
+
+	test_plan_status="$(pj_issues_doc_status "$test_plan_file" 2>/dev/null || true)"
+	if [ "$test_plan_status" != final ]; then
+		say_phase docs "$test_plan_ref isn't final after finalizing (Status: ${test_plan_status:-none}) -- stopping"
+		log "stopped: $test_plan_ref not final"
+		exit 1
+	fi
+	if [ "$(git rev-parse HEAD)" != "$head_before" ] || [ "$(git status --porcelain)" != "$tree_before" ]; then
+		say_phase docs "finalizing the test plan changed the repository, not just the test plan -- stopping"
+		log "stopped: finalizing $test_plan_ref changed the repository"
+		exit 1
+	fi
+}
+
+# review_verdict FILE -- a review file's verdict, or `missing`.
+review_verdict() {
+	if [ -f "$1" ]; then
+		sed -n '1s/^Verdict: //p' "$1"
+	else
+		echo missing
+	fi
+}
+
+# print_handoff -- the end of a stacked run: what was built and checked, what
+# is left for a person to verify, and how to publish. Publishing stays the
+# human's step; this only says what to run.
+print_handoff() {
+	say_ok loop "done -- $completed issue(s) completed this run; the stack is built, reviewed and verified"
+	log "finished: $completed issue(s), stack approved"
+
+	handoff_layers="$(gh stack view --json </dev/null 2>/dev/null | pj_stack_layers 2>/dev/null || true)"
+	echo
+	echo "Layers, bottom to top:"
+	layer_number=1
+	for layer in $handoff_layers; do
+		layer_issue=""
+		for done_issue in $(pj_issues_scan_done "$PJ_ISSUES_DIR"); do
+			if [ "$(pj_issues_branch "$done_issue")" = "$layer" ]; then
+				layer_issue="$done_issue"
+			fi
+		done
+		layer_slug="$(basename "${layer_issue:-unknown.md}" .md)"
+		spec_file="issues/reviews/$layer_slug.md"
+		quality_file="issues/reviews/$layer_slug.quality.md"
+		notes="$(cat "$spec_file" "$quality_file" 2>/dev/null | grep -c '^[0-9]*\. \*\*\[note\]' || true)"
+		notes_text=""
+		[ "${notes:-0}" -eq 0 ] || notes_text="  ($notes note(s) carried to the stack review)"
+		printf '  %s  %s  %s  spec: %s  quality: %s%s\n' "$layer_number" "$layer" \
+			"$(git rev-parse --short "$layer")" "$(review_verdict "$spec_file")" \
+			"$(review_verdict "$quality_file")" "$notes_text"
+		layer_number=$((layer_number + 1))
+	done
+
+	test_plan_ids="$(grep -o '^### [ME][TC]-[0-9]*' "$test_plan_file" 2>/dev/null | sed 's/^### //' | tr '\n' ' ' | sed 's/ $//')"
+	echo
+	echo "Stack review: approved -- $stack_file"
+	echo "pj-stack-verify: every layer passes '$test_cmd'"
+	echo "Test plan: $test_plan_ref -- work through ${test_plan_ids:-its manual cases} by hand"
+	echo
+	echo "Then publish, from the host:"
+	echo "  gh stack submit    # you choose each pull request's title, description and draft state there"
+	if [ -f "${PJ_SANDBOX_MARKER:-/etc/pj-sandbox}" ]; then
+		echo
+		echo "Only the branches travel back to the host, not gh-stack's own record of"
+		echo "the stack. If 'gh stack view' there doesn't show it, recreate it first:"
+		echo "  gh stack init $(printf '%s ' $handoff_layers | sed 's/ $//')"
+	fi
+}
+
+stack_approved=""
 if [ -n "$stack_trunk" ]; then
 	if [ -n "$stopped_early" ]; then
 		say_phase stak "skipping the stack review: the run stopped early"
@@ -1069,8 +1174,15 @@ if [ -n "$stack_trunk" ]; then
 			say_phase stak "skipping the stack review: --no-review"
 		else
 			review_stack
+			finalize_test_plan
+			stack_approved=1
 		fi
 	fi
+fi
+
+if [ -n "$stack_approved" ]; then
+	print_handoff
+	exit 0
 fi
 
 say_ok loop "done -- $completed issue(s) completed this run"

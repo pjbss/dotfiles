@@ -167,6 +167,8 @@ render --label qual --color
 assert_contains "$out" "$esc[1;35mqual" "the qual label is bold magenta"
 render --label rev --color
 assert_not_contains "$out" "$esc[1;35m" "rev keeps its own plain magenta"
+render --label docs --color
+assert_contains "$out" "$esc[1;32mdocs" "the docs label (the test plan finalize) is bold green"
 render --label stak --color
 assert_contains "$out" "$esc[1;36mstak" "the stak label (the whole-stack review) is bold cyan"
 

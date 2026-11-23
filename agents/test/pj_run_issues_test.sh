@@ -88,6 +88,7 @@ if [ -n "${STUB_ENV_LOG:-}" ]; then
 	case "$prompt" in
 		*"pj-review-stack skill"*) call=stack ;;
 		*"requested changes in stack layer"*) call=stackfix ;;
+		*"pj-write-test-plan skill"*) call=testplan ;;
 		*"pj-review-quality skill"*) call=quality ;;
 		*"pj-review skill"*) call=review ;;
 		*"pj-commit skill"*) call=commit ;;
@@ -176,6 +177,29 @@ VERDICT
 		say_stub "stub: reviewed the stack -> $verdict"
 		;;
 
+	*"pj-write-test-plan skill"*)
+		test_plan="$(printf '%s' "$prompt" | grep -o 'issues/test-plan[A-Za-z0-9._-]*\.md' | head -1)"
+		status="final (2026-11-23)"
+		[ "${STUB_TESTPLAN_MODE:-}" = draft ] && status="draft"
+		# dirty: the finalize also edits a tracked file, which it must not.
+		[ "${STUB_TESTPLAN_MODE:-}" = dirty ] && echo "stray edit" >> stub-work-001-slice.txt
+		cat > "$test_plan" <<PLAN
+# Test plan — stub
+
+Status: $status
+Plan: issues/plan.md
+
+## 4. Manual test cases
+
+### MT-1 — stub manual case
+
+## 5. Exploratory charters
+
+### EC-1 — Explore the seams with the stub to discover drift
+PLAN
+		say_stub "stub: finalized $test_plan -> $status"
+		;;
+
 	*"requested changes in stack layer"*)
 		branch="$(printf '%s' "$prompt" | grep -o 'w/[0-9][0-9]-[a-z-]*' | head -1)"
 		if [ -n "${STUB_FIX_LOG_DIR:-}" ]; then
@@ -218,7 +242,7 @@ Verdict: $verdict
 
 ## Findings
 
-1. **[blocking] STUB_QUALITY_FINDING_LABEL** -- \`src/stub.sh:7\`
+1. **[${STUB_QUALITY_SEVERITY:-blocking}] STUB_QUALITY_FINDING_LABEL** -- \`src/stub.sh:7\`
    STUB_QUALITY_FINDING_DETAIL
 VERDICT
 		fi
@@ -386,7 +410,7 @@ run_loop() {
 	local repo="$1"
 	shift
 	if out="$(cd "$repo" && PATH="$stub_bin:${STUB_GH_DIR:+$STUB_GH_DIR:}$PATH" \
-		PJ_SANDBOX_MARKER="$marker" \
+		PJ_SANDBOX_MARKER="${RUN_MARKER:-$marker}" \
 		STUB_MODE="${STUB_MODE:-normal}" STUB_VERDICT="${STUB_VERDICT:-approved}" \
 		NO_COLOR=1 "$RUN_ISSUES" "$@" <"$marker" 2>&1)"; then
 		rc=0
@@ -1070,7 +1094,7 @@ make_stacked_repo() {
 		printf '\n## Branch\n\nw/0%s-slice\n\n## Plan section\n\n`issues/plan.md` Layer %s\n' "$n" "$n" \
 			>> "$project/issues/00$n-slice.md"
 	done
-	printf '# Plan — x\n\nStatus: %s\nTrunk: %s\n\n## Stack\n\n| # | Branch | Delivers | Depends on | ~non-test lines |\n|---|---|---|---|---|\n| 1 | w/01-slice | US-1 | trunk | 10 |\n| 2 | w/02-slice | US-2 | 1 | 10 |\n' \
+	printf '# Plan — x\n\nStatus: %s\nTrunk: %s\nTest plan: issues/test-plan-stub.md\n\n## Stack\n\n| # | Branch | Delivers | Depends on | ~non-test lines |\n|---|---|---|---|---|\n| 1 | w/01-slice | US-1 | trunk | 10 |\n| 2 | w/02-slice | US-2 | 1 | 10 |\n' \
 		"${2:-approved (2026-11-21)}" "$trunk" > "$project/issues/plan.md"
 	echo "$project"
 }
@@ -1334,6 +1358,66 @@ STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_STACK_VERDICT=approved STUB_ST
 assert_exit_code 0 "$rc" "a stack review with only notes approves the run"
 assert_eq "0" "$(count_calls "$env_log" stackfix)" "and no fix agent runs"
 
+# --- the handoff: the test plan finalized, then what to verify and publish ---
+
+project="$(make_stacked_repo stack-handoff)"
+env_log="$fixture_root/stack-handoff-env.log"
+prompt_log="$fixture_root/stack-handoff-prompts.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_PROMPT_LOG="$prompt_log" run_loop "$project"
+assert_exit_code 0 "$rc" "an approved stack ends the run with exit 0"
+assert_eq "1" "$(count_calls "$env_log" testplan)" "the test plan is finalized once, in its own invocation"
+last_stack="$({ grep -n '^stack ' "$env_log" || true; } | tail -1 | cut -d: -f1)"
+finalize="$({ grep -n '^testplan ' "$env_log" || true; } | head -1 | cut -d: -f1)"
+assert_ok "after the last stack-review prompt" test "${finalize:-0}" -gt "${last_stack:-999999}"
+assert_contains "$(cat "$prompt_log")" "pj-write-test-plan skill in finalize mode on issues/test-plan-stub.md" "naming the test plan the plan's header names"
+assert_ok "the test plan ends up final" grep -q '^Status: final' "$project/issues/test-plan-stub.md"
+assert_eq "" "$(git -C "$project" status --porcelain)" "finalizing leaves the tree clean"
+handoff="$(printf '%s\n' "$out" | sed -n '/the stack is built/,$p')"
+w1="$(git -C "$project" rev-parse --short w/01-slice)"
+w2="$(git -C "$project" rev-parse --short w/02-slice)"
+assert_ok "the handoff lists layer 1 with its branch, commit and both verdicts" \
+	grep -q -E "^ +1 +w/01-slice +$w1 +spec: approved +quality: approved" <<<"$handoff"
+assert_ok "and layer 2" grep -q -E "^ +2 +w/02-slice +$w2 +spec: approved +quality: approved" <<<"$handoff"
+assert_ok "bottom to top" test "$(line_of "$handoff" "w/01-slice")" -lt "$(line_of "$handoff" "w/02-slice")"
+assert_contains "$handoff" "issues/reviews/stack.md" "the handoff names the stack review"
+assert_contains "$handoff" "every layer passes" "and that pj-stack-verify passed on every layer"
+assert_contains "$handoff" "issues/test-plan-stub.md" "and the test plan"
+assert_contains "$handoff" "MT-1" "with its manual cases"
+assert_contains "$handoff" "EC-1" "and charters"
+assert_contains "$handoff" "gh stack submit" "and the next command, publishing"
+assert_contains "$handoff" "gh stack init w/01-slice w/02-slice" "inside a sandbox, it gives the host-side gh stack init, layers bottom to top"
+assert_not_contains "$out" "review the branch one commit at a time" "the unstacked ending isn't printed too"
+
+project="$(make_stacked_repo stack-handoff-host)"
+RUN_MARKER="$fixture_root/no-sandbox-here" STUB_GH_DIR="$STUBS" run_loop "$project" --force
+assert_exit_code 0 "$rc" "a stacked run outside a sandbox (--force) also completes"
+assert_contains "$out" "gh stack submit" "it still hands off"
+assert_not_contains "$out" "gh stack init w/01-slice" "but without the sandbox's gh stack init line"
+
+project="$(make_stacked_repo stack-handoff-notes)"
+STUB_GH_DIR="$STUBS" STUB_QUALITY_SEVERITY=note run_loop "$project"
+assert_exit_code 0 "$rc" "a stack whose quality reviews carry notes still completes"
+assert_ok "each layer's row counts the notes its reviews carried" \
+	grep -q -E "^ +1 +w/01-slice .*quality: approved +\(1 note\(s\)" <<<"$out"
+
+project="$(make_stacked_repo stack-handoff-dirty)"
+STUB_GH_DIR="$STUBS" STUB_TESTPLAN_MODE=dirty run_loop "$project"
+assert_exit_code 1 "$rc" "a finalize that changes the repository stops the run"
+assert_contains "$out" "changed the repository" "and says so"
+
+project="$(make_stacked_repo stack-no-test-plan)"
+sed -i.bak '/^Test plan:/d' "$project/issues/plan.md" && rm -f "$project/issues/plan.md.bak"
+env_log="$fixture_root/stack-no-test-plan-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project"
+assert_exit_code 1 "$rc" "a plan with no Test plan: line is refused"
+assert_contains "$out" "no 'Test plan:' line" "naming what's missing"
+assert_not_ok "before any claude invocation" test -s "$env_log"
+
+project="$(make_stacked_repo stack-handoff-draft)"
+STUB_GH_DIR="$STUBS" STUB_TESTPLAN_MODE=draft run_loop "$project"
+assert_exit_code 1 "$rc" "a finalize that leaves the test plan a draft stops the run"
+assert_contains "$out" "isn't final" "and says so"
+
 project="$(make_stacked_repo stack-review-partial)"
 env_log="$fixture_root/stack-review-partial-env.log"
 STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" --max-issues 1
@@ -1346,8 +1430,16 @@ env_log="$fixture_root/stack-review-unstacked-env.log"
 STUB_ENV_LOG="$env_log" run_loop "$project"
 assert_exit_code 0 "$rc" "an unstacked run completes"
 assert_eq "0" "$(count_calls "$env_log" stack)" "an unstacked run sends no stack review"
+assert_eq "0" "$(count_calls "$env_log" testplan)" "and finalizes no test plan"
+assert_contains "$out" "review the branch one commit at a time" "it keeps its ending"
 assert_contains "$(cat "$project"/issues/runs/*/run.log)" "pj-review verdict for 001-slice.md" \
 	"the run log says which issue each verdict was for"
+
+docs_color="$(phase_color_of docs)"
+assert_eq "$(printf '\033[1m\033[32m')" "$docs_color" "docs is bold green in phase_color"
+for label in tdd rev qual stak fix gate git loop; do
+	assert_ok "docs' color differs from $label's" test "$docs_color" != "$(phase_color_of "$label")"
+done
 
 stak_color="$(phase_color_of stak)"
 assert_eq "$(printf '\033[1m\033[36m')" "$stak_color" "stak is bold cyan in phase_color"
@@ -1364,6 +1456,11 @@ assert_contains "$header_flat" "isn't approved" "and its refusals"
 assert_contains "$readme_flat" "pj-review-stack" "the README describes the whole-stack review"
 assert_contains "$readme_flat" "in the layer that owns it" "and its fix phase"
 assert_contains "$header_flat" "exactly one re-review" "the script header describes the fix phase"
+assert_contains "$header_flat" "handoff" "the script header describes the handoff"
+step5="$(sed -n '/^\*\*5\. /,/^\*\*6\. /p' "$DOTFILES_HOME/README" | tr '\n' ' ')"
+assert_contains "$step5" "handoff" "README step 5 describes the handoff"
+assert_contains "$step5" "gh stack submit" "and that publishing is the human's gh stack submit"
+assert_not_contains "$readme_flat" "\`issues/manual-tests.md\` is what connects them" "the README intro points at the test plan for planned work"
 assert_contains "$header_flat" "pj-review-stack" "and so does the script header"
 
 assert_report

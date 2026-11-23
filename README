@@ -146,8 +146,9 @@ credentials.
 The shape of a task: spawn a sandbox, plan inside it with you in the loop, let
 the agents implement the plan while you do something else, then review the
 result one commit at a time. Steps 3 and 5 are the ones with a human in them,
-and `issues/manual-tests.md` is what connects them: step 3 writes down what only
-a person can check, step 5 is where you check it. Everything else is mechanical.
+and the test plan (`issues/test-plan.md`, or `issues/manual-tests.md` for work
+planned without a plan) is what connects them: step 3 writes down what only a
+person can check, step 5 is where you check it. Everything else is mechanical.
 
 **1. Spawn a sandbox, from the repo you want to work on.**
 
@@ -366,6 +367,17 @@ is the difference between a green suite and a verified branch. If something
 needs changing, go back into the sandbox and fix it there, or fix it on the
 host -- it's the same worktree either way.
 
+A stacked run (issues cut from a plan) ends with a handoff instead. It lists
+every layer bottom to top with its commit and both review verdicts, the stack
+review and its file, `pj-stack-verify` passing on every layer, and the test
+plan, finalized from what the reviews recorded, with its `MT-n` cases and
+`EC-n` charters. Work through those by hand: that's the verification no test
+made. Publishing is yours, from the host, with `gh stack submit`, where you
+choose each pull request's title, description and draft state. Inside a
+sandbox the handoff also prints the `gh stack init <layers>` to run on the host
+if `gh stack view` there doesn't show the stack, since only the branches travel
+back, not gh-stack's own record of it.
+
 **6. Push, then tear down.**
 
     $ git push -u origin add-csv-export     # from the host: sandboxes hold no push credentials
@@ -541,8 +553,8 @@ acting on the real non-sandboxed environment, an issue that produced no commit,
 a leftover dirty tree, a `changes-requested` still standing after two
 remediation passes. Everything lands in
 `issues/runs/<timestamp>/`. A criterion that merely needs human *eyes* is not
-on that list: it belongs in `issues/manual-tests.md`, and the run ends by
-pointing there.
+on that list: it belongs in the plan's test plan (or `issues/manual-tests.md`
+for unplanned work), and the run ends by pointing there.
 
 Two things make this safe enough to leave alone. `make test` is the gate -- the
 `Stop` hook refuses to let a session finish while it's red -- and the loop

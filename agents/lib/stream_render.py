@@ -58,6 +58,7 @@ LABEL_COLORS = {
     "rev": "\033[35m",      # magenta
     "qual": "\033[1;35m",   # bold magenta: the second review lens
     "stak": "\033[1;36m",   # bold cyan: the whole-stack review
+    "docs": "\033[1;32m",   # bold green: finalizing the test plan
     "fix": "\033[33m",      # yellow
     "gate": "\033[34m",     # blue
     "git": "\033[1m",       # bold
