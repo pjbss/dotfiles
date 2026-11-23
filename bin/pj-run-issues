@@ -136,8 +136,13 @@
 # the whole stack is checked before the run ends: pj-stack-verify runs the gate
 # on every layer, then pj-review-stack reviews the whole diff, trunk to top,
 # against the PRD, the plan and every per-layer review, in its own process
-# under the `stak` label. A failing layer or a `changes-requested` stops the
-# run with exit 1 and every layer left committed. The stack review is skipped,
+# under the `stak` label. A failing layer stops the run with exit 1. On
+# `changes-requested`, each blocking finding is fixed in the layer that owns
+# it, bottom to top: a fix agent (`fix`), the gate, one extra commit by
+# pj-commit with a `Review:` trailer (`git`), then `gh stack rebase --upstack
+# --no-trunk`. Then pj-stack-verify again and exactly one re-review; still
+# `changes-requested` stops the run with every fix committed. There is no
+# second fix wave. The stack review is skipped,
 # saying why, when the run stopped early or --max-issues left plan issues open;
 # under --no-review the per-layer gate still runs and only the review is
 # skipped.
@@ -642,6 +647,31 @@ prepare_layer() {
 	run_gh stack init --base "$stack_trunk" "$layer_branch"
 }
 
+# require_one_commit WHAT NOUN -- exactly one new commit since $commit_before,
+# and a clean tree after it, or the run stops. One commit per NOUN (an issue,
+# a stack-review fix) is what makes an unattended run reviewable afterwards.
+require_one_commit() {
+	new_commits="$(git rev-list --count "$commit_before"..HEAD)"
+
+	if [ "$new_commits" -eq 0 ]; then
+		say_phase git "$1 produced no commit -- stopping rather than folding it into the next $2's"
+		log "stopped: no commit produced for $1"
+		exit 1
+	fi
+
+	if [ "$new_commits" -gt 1 ]; then
+		say_phase git "$1 produced $new_commits commits -- stopping, since one commit per $2 is what makes this run reviewable"
+		log "stopped: $new_commits commits produced for $1"
+		exit 1
+	fi
+
+	if [ -n "$(git status --porcelain)" ]; then
+		say_phase git "uncommitted changes left over after $1 -- stopping"
+		log "stopped: dirty tree after $1"
+		exit 1
+	fi
+}
+
 completed=0
 # Set by every break that ends the run on a problem rather than on a drained
 # queue or --max-issues, so the sweep below can tell the two apart.
@@ -835,25 +865,7 @@ Do not change any code. Do not push." \
 		exit 1
 	}
 
-	new_commits="$(git rev-list --count "$commit_before"..HEAD)"
-
-	if [ "$new_commits" -eq 0 ]; then
-		say_phase git "$issue_name produced no commit -- stopping rather than folding it into the next issue's"
-		log "stopped: no commit produced for $issue_name"
-		exit 1
-	fi
-
-	if [ "$new_commits" -gt 1 ]; then
-		say_phase git "$issue_name produced $new_commits commits -- stopping, since one commit per issue is what makes this run reviewable"
-		log "stopped: $new_commits commits produced for $issue_name"
-		exit 1
-	fi
-
-	if [ -n "$(git status --porcelain)" ]; then
-		say_phase git "uncommitted changes left over after $issue_name -- stopping"
-		log "stopped: dirty tree after $issue_name"
-		exit 1
-	fi
+	require_one_commit "$issue_name" issue
 
 	completed=$((completed + 1))
 	say_ok loop "committed $issue_name as $(git rev-parse --short HEAD)"
@@ -905,9 +917,9 @@ verify_stack() {
 	printf '%s\n' "$verify_out" | while IFS= read -r line; do say_sub stak "$line"; done
 }
 
-review_stack() {
-	plan_base="$(basename "$plan_ref" .md)"
-	stack_file="issues/reviews/stack${plan_base#plan}.md"
+# run_stack_review -- one pj-review-stack pass over the whole stack, from the
+# top layer; sets $lens_verdict.
+run_stack_review() {
 	top_branch="$(git symbolic-ref --quiet --short HEAD || git rev-parse --short HEAD)"
 
 	say_phase stak "reviewing the whole stack, $stack_trunk...$top_branch"
@@ -923,9 +935,124 @@ commit, and do not publish the stack." "$run_dir/stack-review.log" stak || {
 	}
 
 	judge_verdict stak "$stack_file" pj-review-stack "the stack"
+}
+
+# fix_stack -- one wave of fixes for the stack review's blocking findings, each
+# made in the layer that owns it (its `Layer:` line), bottom to top, so a fix
+# in a lower layer has flowed up into every layer above before that layer is
+# fixed. Each fix is gated, committed as one extra commit on its layer (with a
+# `Review:` trailer, pj-commit's one exception), and rebased upstack. Every
+# owner is checked before any fixer runs: a finding the loop can't place is a
+# question for a human, not a guess.
+fix_stack() {
+	findings_index="$(pj_stack_blocking_findings "$stack_file")"
+	if [ -z "$findings_index" ]; then
+		say_phase stak "the stack review requested changes but names no [blocking] finding -- stopping for a human"
+		log "stopped: changes-requested with no blocking finding in $stack_file"
+		exit 1
+	fi
+
+	if ! stack_json="$(gh stack view --json </dev/null 2>&1)"; then
+		say_phase git "'gh stack view --json' failed -- stopping"
+		printf '%s\n' "$stack_json" | sed 's/^/             /'
+		log "stopped: 'gh stack view --json' failed: $stack_json"
+		exit 1
+	fi
+	stack_layers="$(printf '%s' "$stack_json" | pj_stack_layers)" || fail "couldn't parse 'gh stack view --json'"
+
+	# Split on the tab by hand: `IFS=<tab> read` treats a tab as whitespace and
+	# would swallow the empty owner of a finding with no Layer: line.
+	tab="$(printf '\t')"
+	while IFS= read -r finding; do
+		finding_owner="${finding%%"$tab"*}"
+		finding_label="${finding#*"$tab"}"
+		if [ -z "$finding_owner" ]; then
+			say_phase stak "the blocking finding '$finding_label' has no 'Layer:' line -- stopping before any fix, since there's no telling which layer owns it"
+			log "stopped: blocking finding '$finding_label' has no Layer:"
+			exit 1
+		fi
+		if ! printf '%s\n' "$stack_layers" | grep -qxF "$finding_owner"; then
+			say_phase stak "the blocking finding '$finding_label' names '$finding_owner', which isn't a branch of this stack -- stopping before any fix"
+			log "stopped: blocking finding '$finding_label' names unknown layer $finding_owner"
+			exit 1
+		fi
+	done <<FINDINGS
+$findings_index
+FINDINGS
+
+	for layer in $stack_layers; do
+		layer_findings="$(pj_stack_layer_findings "$stack_file" "$layer")"
+		[ -n "$layer_findings" ] || continue
+		layer_slug="$(printf '%s' "$layer" | tr '/' '_')"
+
+		say_phase fix "fixing the stack review's findings in $layer"
+		git checkout -q "$layer" || fail "couldn't check out $layer"
+		commit_before="$(git rev-parse HEAD)"
+
+		run_claude "The whole-stack review in $stack_file requested changes in stack layer
+$layer, which is checked out. Fix these findings, and only these, in this
+layer -- a fix here reaches every layer above it once this loop rebases them:
+
+$layer_findings
+
+Keep the test suite green. Do not commit, and do not push or publish anything:
+this loop commits the fix itself." "$run_dir/stack-fix-$layer_slug.log" fix || {
+			say_phase fix "claude exited non-zero while fixing $layer -- stopping"
+			log "stopped: claude failed fixing $layer"
+			exit 1
+		}
+
+		if [ "$(git rev-parse HEAD)" != "$commit_before" ]; then
+			say_phase fix "the fix on $layer was committed despite the instruction not to -- rewinding"
+			log "rewound a premature commit while fixing $layer"
+			git reset --soft "$commit_before" >/dev/null
+		fi
+
+		git add -A
+
+		if ! make_test_gate "$run_log"; then
+			say_phase gate "'$test_cmd' is failing after the fix on $layer -- stopping"
+			log "stopped: '$test_cmd' failed after fixing $layer"
+			exit 1
+		fi
+
+		say_phase git "committing the fix on $layer"
+		run_claude "Use the pj-commit skill to make exactly one commit for the staged
+stack-review fix on layer $layer. It is a stack-review fix, not an issue: end
+the message with the trailer 'Review: $stack_file' instead of an Issue:
+trailer.
+
+Do not change any code. Do not push." "$run_dir/stack-fix-$layer_slug.commit.log" git || {
+			say_phase git "claude exited non-zero while committing the fix on $layer -- stopping"
+			log "stopped: claude failed committing the fix on $layer"
+			exit 1
+		}
+
+		require_one_commit "the fix on $layer" "stack-review fix"
+		say_ok loop "committed the fix on $layer as $(git rev-parse --short HEAD)"
+		log "committed the fix on $layer as $(git rev-parse HEAD)"
+
+		say_phase git "rebasing the layers above $layer onto the fix"
+		run_gh stack rebase --upstack --no-trunk
+	done
+}
+
+review_stack() {
+	plan_base="$(basename "$plan_ref" .md)"
+	stack_file="issues/reviews/stack${plan_base#plan}.md"
+
+	run_stack_review
+	[ "$lens_verdict" = approved ] && return 0
+
+	fix_stack
+
+	run_gh stack top
+	verify_stack
+	say_phase stak "re-reviewing the whole stack after the fixes -- once"
+	run_stack_review
 	if [ "$lens_verdict" != approved ]; then
-		say_phase stak "the stack review requested changes -- stopping for a human. Every layer stays committed; $stack_file says what to fix, and in which layer"
-		log "stopped: the stack review requested changes"
+		say_phase stak "the stack review still requests changes after one round of fixes -- stopping for a human; there is no second fix wave. Every fix stays committed, and $stack_file says what is left. Re-running this loop won't re-enter the stack phase: once fixed, run pj-stack-verify and the pj-review-stack skill yourself"
+		log "stopped: the stack re-review still requested changes"
 		exit 1
 	fi
 }

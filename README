@@ -512,8 +512,17 @@ the PRD, the plan's interfaces and review focus, and every per-layer review,
 including the `[note]` findings they carried forward. It looks for what no
 single layer's review could see: seams that don't match, duplication across
 layers, a layer that no longer stands alone. Each finding names the layer that
-owns the fix, in `issues/reviews/stack.md`. A failing layer or requested
-changes stop the run with every layer still committed. A run stopped early, or
+owns the fix, in `issues/reviews/stack.md`. A failing layer stops the run.
+When the review requests changes, each blocking finding is fixed in the layer
+that owns it, bottom layer first: a fix agent works on that one layer's
+findings, the gate runs, `pj-commit` adds one extra commit with a `Review:`
+trailer naming the stack review, and `gh stack rebase --upstack --no-trunk`
+carries the fix up through the layers above. Then every layer is verified again
+and the stack is re-reviewed exactly once; if that still requests changes, the
+run stops for you with every fix committed. There is no second round. Re-running
+the loop after a stop in the stack phase doesn't re-enter it -- its queue is
+already drained -- so finish by hand: fix what's left, then run
+`pj-stack-verify` and the `pj-review-stack` skill yourself. A run stopped early, or
 cut short by `--max-issues` with plan issues still open, skips the stack review
 and says why.
 

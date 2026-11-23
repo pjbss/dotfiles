@@ -87,6 +87,7 @@ issue_file="issues/$issue_name"
 if [ -n "${STUB_ENV_LOG:-}" ]; then
 	case "$prompt" in
 		*"pj-review-stack skill"*) call=stack ;;
+		*"requested changes in stack layer"*) call=stackfix ;;
 		*"pj-review-quality skill"*) call=quality ;;
 		*"pj-review skill"*) call=review ;;
 		*"pj-commit skill"*) call=commit ;;
@@ -120,7 +121,40 @@ next_verdict() {
 case "$prompt" in
 	*"pj-review-stack skill"*)
 		stack_file="$(printf '%s' "$prompt" | grep -o 'issues/reviews/stack[A-Za-z0-9._-]*\.md' | head -1)"
-		verdict="${STUB_STACK_VERDICT:-approved}"
+		verdict="$(next_verdict stack "${STUB_STACK_VERDICTS:-${STUB_STACK_VERDICT:-approved}}")"
+		# The findings' shape. By default a blocking finding for each of
+		# layers 2 and 1 -- layer 2 listed first, so a fix order that followed
+		# the file instead of the stack would show -- plus a note. nolayer and
+		# unknown add a bad-owner blocking finding beside a valid layer-1 one,
+		# so skipping the owner check would visibly fix layer 1 anyway. none:
+		# changes requested with no blocking finding at all. notes: an approval
+		# carrying only a note.
+		layer1='STUB_FIX_LAYER1** -- `src/stub.sh:9`
+   Layer: w/01-slice
+   STUB_DETAIL_LAYER1'
+		case "$verdict:${STUB_STACK_FINDINGS:-}" in
+			approved:notes) findings='1. **[note] STUB_STACK_NOTE** -- `src/stub.sh:3`
+   Layer: w/02-slice
+   a note, not a blocker' ;;
+			approved:*) findings='None.' ;;
+			*:nolayer) findings="1. **[blocking] STUB_ORPHAN_FINDING** -- \`src/stub.sh:5\`
+   no owner named
+2. **[blocking] $layer1" ;;
+			*:unknown) findings="1. **[blocking] STUB_UNKNOWN_LAYER** -- \`src/stub.sh:5\`
+   Layer: w/99-missing
+   names a branch the stack does not have
+2. **[blocking] $layer1" ;;
+			*:none) findings='1. **[note] STUB_STACK_NOTE** -- `src/stub.sh:3`
+   Layer: w/02-slice
+   a note, not a blocker' ;;
+			*) findings="1. **[blocking] STUB_FIX_LAYER2** -- \`src/stub.sh:12\`
+   Layer: w/02-slice
+   STUB_DETAIL_LAYER2
+2. **[note] STUB_STACK_NOTE** -- \`src/stub.sh:3\`
+   Layer: w/02-slice
+   a note, not a blocker
+3. **[blocking] $layer1" ;;
+		esac
 		if [ "${STUB_STACK_MODE:-}" != nofile ]; then
 			mkdir -p issues/reviews
 			cat > "$stack_file" <<VERDICT
@@ -132,9 +166,7 @@ stub stack review
 
 ## Findings
 
-1. **[blocking] STUB_STACK_FINDING** -- \`src/stub.sh:9\`
-   Layer: w/01-slice
-   STUB_STACK_DETAIL
+$findings
 
 ## Carried-over notes
 
@@ -142,6 +174,27 @@ None.
 VERDICT
 		fi
 		say_stub "stub: reviewed the stack -> $verdict"
+		;;
+
+	*"requested changes in stack layer"*)
+		branch="$(printf '%s' "$prompt" | grep -o 'w/[0-9][0-9]-[a-z-]*' | head -1)"
+		if [ -n "${STUB_FIX_LOG_DIR:-}" ]; then
+			printf '%s\n' "$prompt" > "$STUB_FIX_LOG_DIR/$(printf '%s' "$branch" | tr / _).prompt"
+			printf '%s\n' "$branch" >> "$STUB_FIX_LOG_DIR/order"
+		fi
+		# conflict: layer 1's fix writes the file layer 2's own commit adds,
+		# so rebasing layer 2 onto it conflicts for real.
+		if [ "${STUB_FIX_MODE:-}" = conflict ] && [ "$branch" = w/01-slice ]; then
+			echo "a conflicting fix" > stub-work-002-slice.txt
+		else
+			echo "fixed" >> "stub-fix-$(printf '%s' "$branch" | tr / _).txt"
+		fi
+		# eagercommit: the fixer commits despite being told not to.
+		if [ "${STUB_FIX_MODE:-}" = eagercommit ]; then
+			git add -A
+			git commit -q -m "Premature fix on $branch"
+		fi
+		say_stub "stub: fixed $branch"
 		;;
 
 	*"pj-review-quality skill"*)
@@ -194,12 +247,25 @@ VERDICT
 
 	*"pj-commit skill"*)
 		git add -A
-		git commit -q -m "Implement ${issue_name%.md}
+		case "$prompt" in
+			*"stack-review fix"*)
+				review="$(printf '%s' "$prompt" | grep -o 'issues/reviews/stack[A-Za-z0-9._-]*\.md' | head -1)"
+				git commit -q -m "Fix stack review findings
+
+Stub fix.
+
+Review: $review"
+				say_stub "stub: committed a stack-review fix"
+				;;
+			*)
+				git commit -q -m "Implement ${issue_name%.md}
 
 Stub implementation.
 
 Issue: issues/$issue_name"
-		say_stub "stub: committed $issue_name"
+				say_stub "stub: committed $issue_name"
+				;;
+		esac
 		;;
 
 	*"requested changes to your"*)
@@ -1126,11 +1192,13 @@ assert_ok "the stack reviewer's lines are labeled stak" grep -q -E 'stak +.*stub
 project="$(make_stacked_repo stack-review-rejects)"
 trunk="$(git -C "$project" branch --show-current)"
 STUB_GH_DIR="$STUBS" STUB_STACK_VERDICT=changes-requested run_loop "$project"
-assert_exit_code 1 "$rc" "a stack review requesting changes stops the run with exit 1"
-assert_ok "its findings are printed under stak" grep -q -E 'stak +↳ .*STUB_STACK_FINDING' <<<"$out"
+assert_exit_code 1 "$rc" "a re-review still requesting changes stops the run with exit 1"
+assert_ok "its findings are printed under stak" grep -q -E 'stak +↳ .*STUB_FIX_LAYER1' <<<"$out"
 assert_contains "$out" "Layer: w/01-slice" "with the layer that owns each one"
-assert_eq "1" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1's commit is left in place"
-assert_eq "1" "$(commits_between "$project" w/01-slice w/02-slice)" "and layer 2's"
+assert_eq "2" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1 keeps its issue commit and its fix commit"
+assert_eq "2" "$(commits_between "$project" w/01-slice w/02-slice)" "and so does layer 2"
+assert_contains "$out" "no second fix wave" "there is no second round of fixes"
+assert_contains "$out" "run pj-stack-verify and the pj-review-stack skill yourself" "and the stop says how to finish by hand"
 
 project="$(make_stacked_repo stack-review-nofile)"
 STUB_GH_DIR="$STUBS" STUB_STACK_MODE=nofile run_loop "$project"
@@ -1173,6 +1241,99 @@ assert_contains "$out" "all 2 layer(s) pass" "after verifying every layer"
 assert_eq "0" "$(count_calls "$env_log" stack)" "but sends no stack review"
 assert_contains "$out" "skipping the stack review: --no-review" "and says why"
 
+# --- the fix phase: fixed in the owning layer, bottom first, re-reviewed once ---
+
+# nth_line_of TEXT NEEDLE N -- the line number of the Nth line containing NEEDLE.
+nth_line_of() { printf '%s\n' "$1" | { grep -n -F -e "$2" || true; } | sed -n "${3}p" | cut -d: -f1; }
+
+project="$(make_stacked_repo stack-fix)"
+trunk="$(git -C "$project" branch --show-current)"
+env_log="$fixture_root/stack-fix-env.log"
+fix_logs="$fixture_root/stack-fix-prompts"
+mkdir -p "$fix_logs"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_FIX_LOG_DIR="$fix_logs" \
+	STUB_STACK_VERDICTS="changes-requested approved" run_loop "$project"
+assert_exit_code 0 "$rc" "blocking findings fixed in their layers, then re-approved, exit 0"
+assert_eq "w/01-slice w/02-slice" "$(tr '\n' ' ' < "$fix_logs/order" | sed 's/ $//')" "each affected layer is fixed once, bottom first"
+assert_eq "2" "$(commits_between "$project" "$trunk" w/01-slice)" "layer 1 gets exactly one fix commit on top of its issue commit"
+assert_eq "2" "$(commits_between "$project" w/01-slice w/02-slice)" "and so does layer 2"
+assert_contains "$(git -C "$project" log -1 --format=%B w/01-slice)" "Review: issues/reviews/stack.md" "layer 1's fix commit carries a Review: trailer naming the stack review"
+assert_contains "$(git -C "$project" log -1 --format=%B w/02-slice)" "Review: issues/reviews/stack.md" "and so does layer 2's"
+assert_ok "layer 2's branch contains layer 1's fix commit (it was rebased upstack)" \
+	git -C "$project" merge-base --is-ancestor w/01-slice w/02-slice
+assert_eq "2" "$(count_calls "$env_log" stack)" "the stack is reviewed exactly twice: once, then once more after the fixes"
+second_verify="$(nth_line_of "$out" "all 2 layer(s) pass" 2)"
+second_review="$(nth_line_of "$out" "stub: reviewed the stack" 2)"
+assert_ok "pj-stack-verify runs again after the fixes, before the re-review" \
+	test "${second_verify:-999999}" -lt "${second_review:-0}"
+assert_contains "$(cat "$fix_logs/w_01-slice.prompt")" "STUB_DETAIL_LAYER1" "layer 1's fix prompt holds its own finding"
+assert_not_contains "$(cat "$fix_logs/w_01-slice.prompt")" "STUB_DETAIL_LAYER2" "and not layer 2's"
+assert_contains "$(cat "$fix_logs/w_02-slice.prompt")" "STUB_DETAIL_LAYER2" "layer 2's fix prompt holds its own finding"
+assert_not_contains "$(cat "$fix_logs/w_02-slice.prompt")" "STUB_DETAIL_LAYER1" "and not layer 1's"
+assert_not_contains "$(cat "$fix_logs/w_02-slice.prompt")" "STUB_STACK_NOTE" "notes are never handed to a fixer"
+assert_eq "w/02-slice" "$(git -C "$project" branch --show-current)" "the run ends on the top layer"
+assert_eq "" "$(git -C "$project" status --porcelain)" "with a clean tree"
+
+# A fixer that commits anyway is rewound, so its layer still ends with exactly
+# one fix commit -- the one this loop made, with the Review: trailer.
+project="$(make_stacked_repo stack-fix-eager)"
+trunk="$(git -C "$project" branch --show-current)"
+STUB_GH_DIR="$STUBS" STUB_FIX_MODE=eagercommit STUB_STACK_VERDICTS="changes-requested approved" run_loop "$project"
+assert_exit_code 0 "$rc" "a fixer that commits anyway doesn't fail the fix phase"
+assert_contains "$out" "the fix on w/01-slice was committed despite the instruction not to -- rewinding" "its premature commit is rewound"
+assert_eq "2" "$(commits_between "$project" "$trunk" w/01-slice)" "the layer still gets exactly one fix commit"
+assert_contains "$(git -C "$project" log -1 --format=%B w/01-slice)" "Review: issues/reviews/stack.md" "and it's the loop's own, with the Review: trailer"
+
+project="$(make_stacked_repo stack-fix-conflict)"
+fix_logs="$fixture_root/stack-fix-conflict-prompts"
+mkdir -p "$fix_logs"
+STUB_GH_DIR="$STUBS" STUB_FIX_LOG_DIR="$fix_logs" STUB_FIX_MODE=conflict \
+	STUB_STACK_VERDICTS="changes-requested approved" run_loop "$project"
+assert_exit_code 1 "$rc" "a failing gh stack rebase stops the run with exit 1"
+assert_contains "$out" "gh stack rebase --upstack --no-trunk" "naming the command that failed"
+assert_eq "w/01-slice" "$(tr '\n' ' ' < "$fix_logs/order" | sed 's/ $//')" "before the next layer's fix runs"
+
+# Each bad-owner review also holds a valid layer-1 finding, and would approve
+# on a re-review: without the owner check, layer 1 would be fixed, the bad
+# finding dropped, and the run would end green.
+for mode in nolayer unknown; do
+	project="$(make_stacked_repo "stack-fix-$mode")"
+	env_log="$fixture_root/stack-fix-$mode-env.log"
+	STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_STACK_VERDICTS="changes-requested approved" \
+		STUB_STACK_FINDINGS="$mode" run_loop "$project"
+	assert_exit_code 1 "$rc" "a blocking finding with a bad owner ($mode) stops the run"
+	assert_eq "0" "$(count_calls "$env_log" stackfix)" "before any fix agent runs ($mode)"
+	assert_eq "1" "$(count_calls "$env_log" stack)" "and before any re-review ($mode)"
+	case "$mode" in
+		nolayer) assert_contains "$out" "'STUB_ORPHAN_FINDING' has no 'Layer:' line" "the stop names the finding with no owner" ;;
+		unknown) assert_contains "$out" "names 'w/99-missing', which isn't a branch of this stack" "the stop names the unknown owner" ;;
+	esac
+done
+
+project="$(make_stacked_repo stack-fix-none)"
+env_log="$fixture_root/stack-fix-none-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_STACK_VERDICT=changes-requested STUB_STACK_FINDINGS=none run_loop "$project"
+assert_exit_code 1 "$rc" "changes requested with no blocking finding stops the run"
+assert_contains "$out" "names no [blocking] finding" "and says so"
+assert_eq "0" "$(count_calls "$env_log" stackfix)" "without running a fixer"
+
+# A gate that goes red only once layer 1's fix exists: every earlier gate,
+# the sweep and pj-stack-verify run before any fix and pass.
+project="$(make_stacked_repo stack-fix-red-gate)"
+fix_logs="$fixture_root/stack-fix-red-gate-prompts"
+mkdir -p "$fix_logs"
+STUB_GH_DIR="$STUBS" STUB_FIX_LOG_DIR="$fix_logs" STUB_STACK_VERDICTS="changes-requested approved" \
+	run_loop "$project" --test-cmd 'test ! -f stub-fix-w_01-slice.txt'
+assert_exit_code 1 "$rc" "a red gate after a fix stops the run"
+assert_contains "$out" "is failing after the fix on w/01-slice" "naming the layer whose fix broke it"
+assert_eq "w/01-slice" "$(tr '\n' ' ' < "$fix_logs/order" | sed 's/ $//')" "before the next layer's fix"
+
+project="$(make_stacked_repo stack-fix-notes)"
+env_log="$fixture_root/stack-fix-notes-env.log"
+STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" STUB_STACK_VERDICT=approved STUB_STACK_FINDINGS=notes run_loop "$project"
+assert_exit_code 0 "$rc" "a stack review with only notes approves the run"
+assert_eq "0" "$(count_calls "$env_log" stackfix)" "and no fix agent runs"
+
 project="$(make_stacked_repo stack-review-partial)"
 env_log="$fixture_root/stack-review-partial-env.log"
 STUB_GH_DIR="$STUBS" STUB_ENV_LOG="$env_log" run_loop "$project" --max-issues 1
@@ -1201,6 +1362,8 @@ assert_contains "$readme_flat" "gh stack init --base" "including how it creates 
 assert_contains "$header_flat" "Stack mode" "the script header describes stack mode"
 assert_contains "$header_flat" "isn't approved" "and its refusals"
 assert_contains "$readme_flat" "pj-review-stack" "the README describes the whole-stack review"
+assert_contains "$readme_flat" "in the layer that owns it" "and its fix phase"
+assert_contains "$header_flat" "exactly one re-review" "the script header describes the fix phase"
 assert_contains "$header_flat" "pj-review-stack" "and so does the script header"
 
 assert_report

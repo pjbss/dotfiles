@@ -19,6 +19,23 @@ If you find yourself wanting to commit half an issue, or two issues together,
 the issue was decomposed wrong — say so rather than papering over it with
 commit boundaries that don't match the work.
 
+The one exception is a stack-review fix. When the whole-stack review
+(`pj-review-stack`) asks for a change in one layer of a stack, the fix is an
+additional commit on an existing stack layer, on top of that layer's issue
+commit, with a `Review:` trailer naming the stack review instead of `Issue:`:
+
+```
+<imperative subject naming what the fix changes>
+
+<Body: what the stack review found, and why this is the fix.>
+
+Review: issues/reviews/stack.md
+```
+
+(`issues/reviews/stack-<name>.md` for a plan named `plan-<name>.md`.)
+Everything else in this skill applies to it unchanged: one commit per fix,
+a subject saying what changed, a body saying why.
+
 ## Message format
 
 ```
